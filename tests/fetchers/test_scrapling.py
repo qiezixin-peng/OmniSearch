@@ -32,7 +32,14 @@ async def test_http_fetch_normalizes_document() -> None:
     assert document.markdown == "Evidence"
     assert str(document.final_url) == "https://example.com/final"
     assert document.metadata["engine"] == "scrapling"
-    assert calls[0][1] == {"timeout": 30_000, "proxy": None, "impersonate": "chrome"}
+    assert calls[0][1] == {
+        "timeout": 30_000,
+        "proxy": None,
+        "impersonate": "chrome",
+        "retries": 3,
+        "retry_delay": 1,
+        "follow_redirects": "safe",
+    }
 
 
 @pytest.mark.asyncio
@@ -52,12 +59,17 @@ async def test_managed_chrome_preserves_full_scrapling_capabilities(tmp_path) ->
             solve_cloudflare=True,
             hide_canvas=True,
             pierce_shadow=True,
+            record_requests=True,
+            max_recorded_requests=50,
         )
     )
     assert captured["real_chrome"] is True
     assert captured["solve_cloudflare"] is True
     assert captured["hide_canvas"] is True
     assert captured["pierce_shadow"] is True
+    assert captured["record_requests"] is True
+    assert captured["max_recorded_requests"] == 50
+    assert captured["retries"] == 3
 
 
 @pytest.mark.asyncio

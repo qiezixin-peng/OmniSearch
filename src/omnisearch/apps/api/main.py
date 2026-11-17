@@ -24,7 +24,11 @@ from omnisearch.services.acquisition import (
     DocumentAcquisitionService,
 )
 from omnisearch.services.crawl import CrawlReport, CrawlRequest, SiteCrawler
-from omnisearch.services.research import ResearchExecutionService, ResearchRunReport
+from omnisearch.services.research import (
+    ResearchExecutionService,
+    ResearchRunReport,
+    run_with_runtime_budget,
+)
 from omnisearch.services.search import (
     MultiSourceSearchService,
     QuickSearchCommand,
@@ -138,6 +142,12 @@ class SearchDocumentsRequest(BaseModel):
     query: str
     research_id: UUID | None = None
     limit: int = 20
+
+
+class RuntimeBudgetResponse(BaseModel):
+    research_id: UUID
+    status: str = "partial"
+    reason: str = "runtime_budget_exhausted"
 
 
 @app.get("/health")
@@ -302,13 +312,17 @@ def start_research(
     return _transition(research_id, ResearchStatus.RUNNING, service)
 
 
-@app.post("/v1/research/{research_id}/execute", response_model=ResearchRunReport)
+@app.post(
+    "/v1/research/{research_id}/execute",
+    response_model=ResearchRunReport | RuntimeBudgetResponse,
+)
 async def execute_research(
     research_id: UUID,
     service: ResearchExecutionDep,
-) -> ResearchRunReport:
+) -> ResearchRunReport | RuntimeBudgetResponse:
     try:
-        return await service.run(research_id)
+        report = await run_with_runtime_budget(service, service.repository, research_id)
+        return report or RuntimeBudgetResponse(research_id=research_id)
     except ResearchNotFound as error:
         raise HTTPException(status_code=404, detail="research task not found") from error
     except ValueError as error:

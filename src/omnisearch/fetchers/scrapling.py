@@ -35,6 +35,9 @@ class ScraplingFetcher(ContentFetcher):
                 timeout=request.timeout_ms,
                 proxy=proxy,
                 impersonate="chrome",
+                retries=request.retries,
+                retry_delay=max(0, request.retry_delay_ms // 1000),
+                follow_redirects="safe",
             )
         elif request.mode is FetchMode.CHROME_MANAGED:
             response = await self._get_chrome_fetch()(
@@ -67,6 +70,8 @@ class ScraplingFetcher(ContentFetcher):
             "timeout": request.timeout_ms,
             "locale": request.locale,
             "proxy": proxy,
+            "retries": request.retries,
+            "retry_delay": request.retry_delay_ms / 1000,
             "solve_cloudflare": request.solve_cloudflare,
             "block_ads": request.block_ads,
             "disable_resources": request.disable_resources,
@@ -75,6 +80,12 @@ class ScraplingFetcher(ContentFetcher):
             "block_webrtc": request.block_webrtc,
             "allow_webgl": request.allow_webgl,
             "pierce_shadow": request.pierce_shadow,
+            "headless": request.headless,
+            "dns_over_https": request.dns_over_https,
+            "wait_selector": request.wait_selector,
+            "wait": request.wait_after_load_ms,
+            "record_requests": request.record_requests,
+            "max_recorded_requests": request.max_recorded_requests,
         }
 
     @staticmethod
@@ -117,6 +128,8 @@ class ScraplingFetcher(ContentFetcher):
                 "solve_cloudflare": request.solve_cloudflare,
                 "proxy_used": request.proxy_secret_ref is not None,
                 "pierce_shadow": request.pierce_shadow,
+                "record_requests": request.record_requests,
+                "max_recorded_requests": request.max_recorded_requests,
             },
         )
 

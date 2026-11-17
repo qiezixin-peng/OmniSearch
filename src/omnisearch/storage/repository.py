@@ -51,6 +51,7 @@ class SqlResearchRepository:
         row.events = [self._event_to_row(initial_event)]
         with self.database.session_factory.begin() as session:
             session.add(row)
+            session.flush()
             session.add_all(
                 QuestionDependencyRow(
                     sub_question_id=str(item.id), depends_on_id=str(dependency_id)
@@ -139,6 +140,7 @@ class SqlResearchRepository:
                 )
                 for index, item in enumerate(plan.sub_questions)
             ]
+            session.flush()
             session.add_all(
                 QuestionDependencyRow(
                     sub_question_id=str(item.id), depends_on_id=str(dependency_id)

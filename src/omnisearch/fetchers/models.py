@@ -22,6 +22,8 @@ class FetchRequest(StrictModel):
     css_selector: str | None = Field(default=None, max_length=1000)
     main_content_only: bool = True
     locale: str | None = Field(default=None, max_length=35)
+    retries: int = Field(default=3, ge=0, le=10)
+    retry_delay_ms: int = Field(default=1_000, ge=0, le=60_000)
 
     # Browser execution and state isolation.
     chrome_user_data_dir: str | None = None
@@ -39,6 +41,12 @@ class FetchRequest(StrictModel):
     block_webrtc: bool = False
     allow_webgl: bool = True
     pierce_shadow: bool = False
+    headless: bool = True
+    dns_over_https: bool = False
+    wait_selector: str | None = Field(default=None, max_length=1000)
+    wait_after_load_ms: int = Field(default=0, ge=0, le=60_000)
+    record_requests: bool = False
+    max_recorded_requests: int = Field(default=200, ge=1, le=5000)
     proxy_secret_ref: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
