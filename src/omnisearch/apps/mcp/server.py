@@ -24,8 +24,11 @@ mcp = MCPServer(
     description="Agent-first multilingual, multi-source research and acquisition engine",
     version="0.1.0",
     instructions=(
-        "Use search for a fast lookup. Use research_start for complex questions, then poll "
-        "research_status and retrieve research_get_result. Use fetch_page for deep acquisition."
+        "Use search for a fast lookup. For complex questions, the calling Agent must decompose "
+        "the problem, create multilingual queries, and call research_start. Research plans use "
+        "both API providers and direct browser search by default. Poll research_status, retrieve "
+        "research_get_result and get_evidence, then synthesize a cited answer with conflicts and "
+        "unresolved gaps; never dump raw search results as the final answer."
     ),
 )
 
@@ -93,7 +96,7 @@ def _build_agent_plan(
         if original_language != "auto"
         else engine.research.planner.analyzer.detect_language(question)
     )
-    return ResearchPlan(
+    plan = ResearchPlan(
         question=question,
         original_language=language,
         budget=budget,
@@ -118,6 +121,18 @@ def _build_agent_plan(
             for item in queries
         ],
     )
+    return engine.research.planner.ensure_dual_channel(plan)
+
+
+def _plan_channel_summary(engine: OmniRuntime, plan: ResearchPlan) -> dict[str, list[str]]:
+    summary = {"api": [], "browser": []}
+    for source in dict.fromkeys(
+        source for query in plan.queries for source in query.sources
+    ):
+        channel = engine.search.source_channels.get(source)
+        if channel is not None:
+            summary[channel.value].append(source)
+    return summary
 
 
 def runtime() -> OmniRuntime:
@@ -223,7 +238,12 @@ async def search_sources(
     return await search(query, sources, language, max_results_per_source)
 
 
-@mcp.tool(description="Create and asynchronously execute a complete research task.")
+@mcp.tool(
+    description=(
+        "Create a multilingual research task. The plan is forced to cover both real APIs and "
+        "direct browser search; after completion the calling Agent must synthesize the evidence."
+    )
+)
 async def research_start(
     question: str,
     original_language: str = "auto",
@@ -260,6 +280,9 @@ async def research_start(
         )
         engine.repository.apply_plan(task.id, plan)
         planning_mode = "agent_supplied"
+    else:
+        plan = await engine.research.planner.plan_async(question, budget)
+        engine.repository.apply_plan(task.id, plan)
     job_id = engine.jobs.enqueue(
         "research.execute",
         {"research_id": str(task.id)},
@@ -271,8 +294,14 @@ async def research_start(
         "job_id": str(job_id),
         "status": "scheduled",
         "planning_mode": planning_mode,
-        "sub_questions_count": len(sub_questions or []),
-        "queries_count": len(queries or []),
+        "sub_questions_count": len(plan.sub_questions),
+        "queries_count": len(plan.queries),
+        "channel_strategy": "required_dual_channel",
+        "channel_sources": _plan_channel_summary(engine, plan),
+        "agent_next_action": (
+            "Poll research_status until completed/partial, retrieve research_get_result and "
+            "get_evidence, then answer the user with cited synthesis, conflicts and open gaps."
+        ),
     }
 
 
@@ -322,7 +351,12 @@ async def research_status(research_id: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool(description="Retrieve persisted search results for a research task.")
+@mcp.tool(
+    description=(
+        "Retrieve persisted evidence for synthesis. The calling Agent must turn it into a direct "
+        "cited answer, including conflicts and unresolved gaps."
+    )
+)
 def research_get_result(research_id: str, limit: int = 100) -> dict[str, Any]:
     engine = runtime()
     identifier = UUID(research_id)
@@ -334,6 +368,10 @@ def research_get_result(research_id: str, limit: int = 100) -> dict[str, Any]:
         "query_progress": engine.repository.query_progress(identifier),
         "coverage_matrix": engine.repository.coverage_matrix(identifier),
         "results": _research_records_with_evidence(engine, identifier, limit),
+        "agent_next_action": (
+            "Synthesize a direct answer for the user from these records; cite supporting sources, "
+            "state material conflicts, and identify unresolved gaps."
+        ),
     }
 
 

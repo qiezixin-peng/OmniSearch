@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from omnisearch.domain.enums import Channel
 from omnisearch.domain.models import SearchRequest, SearchResult, StrictModel
 from omnisearch.observability import search_failures, search_requests, tracer
 from omnisearch.providers.base import ProviderAdapter, ProviderError
@@ -75,6 +76,22 @@ class MultiSourceSearchService:
             source_id
             for source_id, adapter in self._adapters.items()
             if self._is_configured(adapter)
+        }
+
+    @property
+    def source_channels(self) -> dict[str, Channel]:
+        """Return the channel actually used by each runtime adapter."""
+        return {
+            source_id: adapter.capabilities.channel
+            for source_id, adapter in self._adapters.items()
+        }
+
+    @property
+    def configured_source_channels(self) -> dict[str, Channel]:
+        return {
+            source_id: channel
+            for source_id, channel in self.source_channels.items()
+            if source_id in self.configured_sources
         }
 
     @staticmethod

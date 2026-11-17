@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from pydantic import Field
 
 from omnisearch.core.query import HeuristicQueryAnalyzer, MultilingualQueryEngine
-from omnisearch.domain.enums import SourceCategory
+from omnisearch.domain.enums import Channel, SourceCategory
 from omnisearch.domain.models import ResearchBudget, StrictModel
 from omnisearch.models import ModelResearchAnalysis, ResearchModelGateway
 from omnisearch.providers.registry import SourceRegistry
@@ -42,12 +42,20 @@ class SearchPlanner:
         multilingual: MultilingualQueryEngine | None = None,
         model_gateway: ResearchModelGateway | None = None,
         available_sources: set[str] | None = None,
+        source_channels: dict[str, Channel] | None = None,
+        require_dual_channel: bool = False,
     ) -> None:
         self.registry = registry
         self.analyzer = analyzer or HeuristicQueryAnalyzer()
         self.multilingual = multilingual or MultilingualQueryEngine(self.analyzer)
         self.model_gateway = model_gateway
         self.available_sources = available_sources
+        self.source_channels = source_channels or {
+            source.source_id: source.adapters[0].channel
+            for source in registry.list(enabled_only=False)
+            if source.adapters
+        }
+        self.require_dual_channel = require_dual_channel
 
     async def plan_async(
         self, question: str, budget: ResearchBudget | None = None
@@ -59,7 +67,7 @@ class SearchPlanner:
             analysis = await self.model_gateway.analyze(question)
         except Exception:
             return plan
-        return self._augment_with_model(plan, analysis)
+        return self._finalize(self._augment_with_model(plan, analysis))
 
     def plan(self, question: str, budget: ResearchBudget | None = None) -> ResearchPlan:
         budget = budget or ResearchBudget()
@@ -105,13 +113,91 @@ class SearchPlanner:
         sub_questions = [
             question for question in sub_questions if question.id in executable_ids
         ]
-        return ResearchPlan(
+        plan = ResearchPlan(
             question=question,
             original_language=language,
             sub_questions=sub_questions,
             queries=queries,
             budget=budget,
         )
+        return self._finalize(plan)
+
+    def _finalize(self, plan: ResearchPlan) -> ResearchPlan:
+        return self.ensure_dual_channel(plan) if self.require_dual_channel else plan
+
+    def channel_coverage(self, plan: ResearchPlan) -> set[Channel]:
+        return {
+            self.source_channels[source]
+            for query in plan.queries
+            for source in query.sources
+            if source in self.source_channels
+        }
+
+    def ensure_dual_channel(self, plan: ResearchPlan) -> ResearchPlan:
+        """Guarantee that a research plan uses both API and direct-browser discovery."""
+        required = {Channel.API, Channel.BROWSER}
+        missing = required - self.channel_coverage(plan)
+        if not missing:
+            return plan
+
+        sub_questions = {item.id: item for item in plan.sub_questions}
+        allowed = self.available_sources
+        for channel in sorted(missing, key=lambda item: item.value):
+            candidates = [
+                source
+                for source in self.registry.list(channel=channel)
+                if self.source_channels.get(source.source_id) is channel
+                and (allowed is None or source.source_id in allowed)
+            ]
+            if not candidates:
+                raise ValueError(f"no configured {channel.value} source is available")
+
+            placed = False
+            for query in plan.queries:
+                question = sub_questions[query.sub_question_id]
+                candidate = next(
+                    (
+                        source
+                        for source in candidates
+                        if source.category in question.categories
+                        and source.source_id not in query.sources
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    continue
+                if len(query.sources) < plan.budget.max_sources_per_query:
+                    query.sources.append(candidate.source_id)
+                    query.purpose += f"; required {channel.value} corroboration"
+                    placed = True
+                    break
+
+            if not placed and len(plan.queries) < plan.budget.max_queries:
+                candidate = candidates[0]
+                target = next(
+                    (
+                        item
+                        for item in plan.sub_questions
+                        if candidate.category in item.categories
+                    ),
+                    plan.sub_questions[0],
+                )
+                plan.queries.append(
+                    PlannedQuery(
+                        sub_question_id=target.id,
+                        language=plan.original_language,
+                        query=self._query_for(target, plan.question),
+                        sources=[candidate.source_id],
+                        purpose=f"required {channel.value} independent corroboration",
+                    )
+                )
+                placed = True
+
+            if not placed:
+                raise ValueError(
+                    f"research budget cannot fit required {channel.value} coverage"
+                )
+        return plan
 
     @staticmethod
     def _query_for(sub_question: PlannedSubQuestion, question: str) -> str:

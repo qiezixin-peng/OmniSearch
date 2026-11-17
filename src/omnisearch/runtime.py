@@ -161,6 +161,8 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
             sources,
             model_gateway=model_gateway,
             available_sources=search.configured_sources,
+            source_channels=search.configured_source_channels,
+            require_dual_channel=True,
         ),
         search,
         acquisition=acquisition,

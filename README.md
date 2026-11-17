@@ -99,6 +99,11 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 将其映射为持久化 UUID 并校验预算及 Provider 配置。若 Agent 只传入 `question`，系统才
 使用确定性的启发式拆解兜底，不要求连接任何外部模型。
 
+无论计划由 Agent 提交还是由启发式生成，深度研究都会校验整体通道覆盖：至少包含一个
+真实 API Provider 和一个浏览器直接搜索 Provider。缺少一侧时系统会按子问题类别自动补入
+相关来源。任务完成后由调用 Agent 读取 `research_get_result` 与 `get_evidence`，形成带引用、
+冲突和未解决缺口的最终回答；OmniSearch 本身不绑定另一个外部总结模型。
+
 配置 `OMNISEARCH_OTEL_EXPORTER_OTLP_ENDPOINT` 后，API、Provider 搜索与文档采集会
 输出 OpenTelemetry Trace；运行日志使用结构化 JSON。
 

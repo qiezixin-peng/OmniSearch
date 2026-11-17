@@ -103,7 +103,10 @@ def test_agent_can_supply_complete_research_plan(tmp_path, monkeypatch) -> None:
         )
         assert len(plan.sub_questions) == 2
         assert plan.sub_questions[1].depends_on == [plan.sub_questions[0].id]
-        assert plan.queries[0].sources == ["arxiv", "core"]
+        assert plan.queries[0].sources[:2] == ["arxiv", "core"]
+        assert {
+            item.value for item in engine.research.planner.channel_coverage(plan)
+        } == {"api", "browser"}
         task = engine.coordinator.create(
             ResearchCreate(
                 question=plan.question,
