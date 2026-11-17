@@ -285,24 +285,12 @@ class CoreAdapter(HttpProvider, ProviderAdapter):
         if not self.api_key:
             raise ProviderError("NOT_CONFIGURED", "CORE API key is not configured")
         try:
-            if self._client is None:
-                async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-                    response = await client.post(
-                        self.endpoint,
-                        params={
-                            "limit": request.max_results,
-                            "offset": int(request.cursor or 0),
-                        },
-                        headers={"Authorization": f"Bearer {self.api_key}"},
-                        json={"q": request.query},
-                    )
-            else:
-                response = await self._client.post(
-                    self.endpoint,
-                    params={"limit": request.max_results, "offset": int(request.cursor or 0)},
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"q": request.query},
-                )
+            response = await self._http_client().post(
+                self.endpoint,
+                params={"limit": request.max_results, "offset": int(request.cursor or 0)},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"q": request.query},
+            )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPError as error:

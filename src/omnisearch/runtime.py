@@ -62,6 +62,10 @@ class OmniRuntime:
     def close(self) -> None:
         self.database.engine.dispose()
 
+    async def aclose(self) -> None:
+        await self.search.aclose()
+        self.close()
+
 
 def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     settings = settings or get_settings()

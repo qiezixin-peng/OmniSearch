@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.document_repository = runtime.documents
     app.state.research_execution_service = runtime.research
     yield
-    runtime.close()
+    await runtime.aclose()
 
 
 app = FastAPI(

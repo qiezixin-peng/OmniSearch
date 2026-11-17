@@ -55,15 +55,9 @@ class HttpProvider:
     ) -> httpx.Response:
         merged_headers = {**self._headers, **(headers or {})}
         try:
-            if self._client is None:
-                async with httpx.AsyncClient(
-                    timeout=self._timeout,
-                    follow_redirects=True,
-                    trust_env=self._trust_environment_proxy,
-                ) as client:
-                    response = await client.get(url, params=params, headers=merged_headers)
-            else:
-                response = await self._client.get(url, params=params, headers=merged_headers)
+            response = await self._http_client().get(
+                url, params=params, headers=merged_headers
+            )
         except httpx.TimeoutException as error:
             raise ProviderError("TIMEOUT", f"request timed out: {url}", retryable=True) from error
         except httpx.HTTPError as error:
@@ -82,3 +76,18 @@ class HttpProvider:
         if response.status_code >= 400:
             raise ProviderError("BAD_RESPONSE", f"upstream returned {response.status_code}")
         return response
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=True,
+                trust_env=self._trust_environment_proxy,
+                limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None

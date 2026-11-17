@@ -114,6 +114,15 @@ class MultiSourceSearchService:
             if source_id in self.configured_sources
         }
 
+    async def aclose(self) -> None:
+        closers = [
+            closer()
+            for adapter in self._adapters.values()
+            if callable(closer := getattr(adapter, "aclose", None))
+        ]
+        if closers:
+            await asyncio.gather(*closers, return_exceptions=True)
+
     @staticmethod
     def _is_configured(adapter: ProviderAdapter) -> bool:
         return not adapter.capabilities.requires_credentials or any(
