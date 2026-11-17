@@ -44,6 +44,7 @@ class SearchPlanner:
         available_sources: set[str] | None = None,
         source_channels: dict[str, Channel] | None = None,
         require_dual_channel: bool = False,
+        browser_language_limit: int = 2,
     ) -> None:
         self.registry = registry
         self.analyzer = analyzer or HeuristicQueryAnalyzer()
@@ -56,10 +57,9 @@ class SearchPlanner:
             if source.adapters
         }
         self.require_dual_channel = require_dual_channel
+        self.browser_language_limit = max(1, browser_language_limit)
 
-    async def plan_async(
-        self, question: str, budget: ResearchBudget | None = None
-    ) -> ResearchPlan:
+    async def plan_async(self, question: str, budget: ResearchBudget | None = None) -> ResearchPlan:
         plan = self.plan(question, budget)
         if self.model_gateway is None:
             return plan
@@ -76,6 +76,9 @@ class SearchPlanner:
         sub_questions = self._sub_questions(question, requested)[: budget.max_sub_questions]
         queries: list[PlannedQuery] = []
         variants = self.multilingual.expand(question, language, budget.max_languages)
+        browser_languages = {
+            variant_language for variant_language, _ in variants[: self.browser_language_limit]
+        }
         sources_by_question: dict[UUID, list[str]] = {}
         for sub_question in sub_questions:
             sources_by_question[sub_question.id] = [
@@ -84,22 +87,28 @@ class SearchPlanner:
                     sub_question.categories,
                     limit=budget.max_sources_per_query,
                 )
-                if self.available_sources is None
-                or source.source_id in self.available_sources
+                if self.available_sources is None or source.source_id in self.available_sources
             ]
-        sub_questions = [
-            question for question in sub_questions if sources_by_question[question.id]
-        ]
+        sub_questions = [question for question in sub_questions if sources_by_question[question.id]]
         for variant_language, variant_query in variants:
             for sub_question in sub_questions:
                 if len(queries) >= budget.max_queries:
                     break
+                sources = sources_by_question[sub_question.id]
+                if variant_language not in browser_languages:
+                    api_sources = [
+                        source
+                        for source in sources
+                        if self.source_channels.get(source) is not Channel.BROWSER
+                    ]
+                    if api_sources:
+                        sources = api_sources
                 queries.append(
                     PlannedQuery(
                         sub_question_id=sub_question.id,
                         language=variant_language,
                         query=self._query_for(sub_question, variant_query),
-                        sources=sources_by_question[sub_question.id],
+                        sources=sources,
                         purpose=(
                             "original-language discovery"
                             if variant_language == language
@@ -110,9 +119,7 @@ class SearchPlanner:
             if len(queries) >= budget.max_queries:
                 break
         executable_ids = {query.sub_question_id for query in queries}
-        sub_questions = [
-            question for question in sub_questions if question.id in executable_ids
-        ]
+        sub_questions = [question for question in sub_questions if question.id in executable_ids]
         plan = ResearchPlan(
             question=question,
             original_language=language,
@@ -175,11 +182,7 @@ class SearchPlanner:
             if not placed and len(plan.queries) < plan.budget.max_queries:
                 candidate = candidates[0]
                 target = next(
-                    (
-                        item
-                        for item in plan.sub_questions
-                        if candidate.category in item.categories
-                    ),
+                    (item for item in plan.sub_questions if candidate.category in item.categories),
                     plan.sub_questions[0],
                 )
                 plan.queries.append(
@@ -194,9 +197,7 @@ class SearchPlanner:
                 placed = True
 
             if not placed:
-                raise ValueError(
-                    f"research budget cannot fit required {channel.value} coverage"
-                )
+                raise ValueError(f"research budget cannot fit required {channel.value} coverage")
         return plan
 
     @staticmethod
@@ -215,9 +216,7 @@ class SearchPlanner:
         return f"{question} {suffix}".strip()
 
     @staticmethod
-    def _sub_questions(
-        question: str, requested: set[SourceCategory]
-    ) -> list[PlannedSubQuestion]:
+    def _sub_questions(question: str, requested: set[SourceCategory]) -> list[PlannedSubQuestion]:
         lowered = question.lower()
         primary = PlannedSubQuestion(
             objective=f"确认问题中的核心技术、实体和官方公开信息：{question}",
@@ -304,8 +303,7 @@ class SearchPlanner:
                     proposal.categories,
                     limit=plan.budget.max_sources_per_query,
                 )
-                if self.available_sources is None
-                or source.source_id in self.available_sources
+                if self.available_sources is None or source.source_id in self.available_sources
             ]
             if not sources:
                 continue

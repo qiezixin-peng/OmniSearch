@@ -49,41 +49,34 @@ class BrowserSearchAdapter(ProviderAdapter):
         failures: list[str] = []
         document = None
         parsed_items: list[dict[str, str]] = []
-        for url in self._search_urls(request):
-            for fetcher, mode in (
-                (self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-                (self.ego_fetcher, FetchMode.EGO_BROWSER),
-            ):
-                try:
-                    document = await fetcher.fetch(
-                        FetchRequest(
-                            url=url,
-                            mode=mode,
-                            chrome_user_data_dir=(
-                                self.chrome_user_data_dir
-                                if mode is FetchMode.CHROME_MANAGED
-                                else None
-                            ),
-                            ego_task_name=f"OmniSearch {self.source_id} search",
-                            solve_cloudflare=True,
-                            network_idle=True,
-                            main_content_only=False,
-                        )
+        for url, fetcher, mode in self._attempts(request):
+            try:
+                document = await fetcher.fetch(
+                    FetchRequest(
+                        url=url,
+                        mode=mode,
+                        timeout_ms=20_000,
+                        chrome_user_data_dir=(
+                            self.chrome_user_data_dir if mode is FetchMode.CHROME_MANAGED else None
+                        ),
+                        ego_task_name=f"OmniSearch {self.source_id} search",
+                        solve_cloudflare=True,
+                        network_idle=True,
+                        main_content_only=False,
                     )
-                    if document.raw_html:
-                        candidates = self._parse(document.raw_html)
-                        parsed_items = [
-                            prepared
-                            for item in candidates
-                            if (prepared := await self._prepare_item(item)) is not None
-                        ]
-                    if parsed_items:
-                        break
-                    failures.append(
-                        f"{mode.value} {url}: no search results found in returned page"
-                    )
-                except Exception as error:
-                    failures.append(f"{mode.value} {url}: {error}")
+                )
+                if document.raw_html:
+                    candidates = self._parse(document.raw_html)
+                    parsed_items = [
+                        prepared
+                        for item in candidates
+                        if (prepared := await self._prepare_item(item)) is not None
+                    ]
+                if parsed_items:
+                    break
+                failures.append(f"{mode.value} {url}: no search results found in returned page")
+            except Exception as error:
+                failures.append(f"{mode.value} {url}: {error}")
             if parsed_items:
                 break
         if document is None or not parsed_items:
@@ -121,6 +114,16 @@ class BrowserSearchAdapter(ProviderAdapter):
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
         return [self._search_url(request)]
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        return [
+            (url, fetcher, mode)
+            for url in self._search_urls(request)
+            for fetcher, mode in (
+                (self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+                (self.ego_fetcher, FetchMode.EGO_BROWSER),
+            )
+        ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         raise NotImplementedError
@@ -161,11 +164,10 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
         if not href.startswith("/goto?"):
             return item
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True, trust_env=False, timeout=20
-            ) as client, client.stream(
-                "GET", "https://www.google.com" + href
-            ) as response:
+            async with (
+                httpx.AsyncClient(follow_redirects=True, trust_env=False, timeout=20) as client,
+                client.stream("GET", "https://www.google.com" + href) as response,
+            ):
                 final_url = str(response.url)
         except httpx.HTTPError:
             return None
@@ -192,8 +194,10 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
                 href = parse_qs(urlparse(href).query).get("uddg", [href])[0]
             title = " ".join(anchor.itertext()).strip()
             container = anchor.getparent()
-            while container is not None and container.tag != "article" and "result" not in (
-                container.get("class") or ""
+            while (
+                container is not None
+                and container.tag != "article"
+                and "result" not in (container.get("class") or "")
             ):
                 container = container.getparent()
             snippet = ""
@@ -226,6 +230,13 @@ class XBrowserAdapter(BrowserSearchAdapter):
                 "https://www.google.com/search?q="
                 f"{quote_plus(request.query + ' site:x.com/*/status')}&hl={language}&num=20"
             ),
+        ]
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        direct_url, indexed_url = self._search_urls(request)
+        return [
+            (direct_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+            (indexed_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
         ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
@@ -285,8 +296,7 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     def _search_url(self, request: SearchRequest) -> str:
         language = (request.language or "en").split("-", 1)[0]
         return (
-            f"https://scholar.google.com/scholar?q={quote_plus(request.query)}"
-            f"&hl={language}&num=20"
+            f"https://scholar.google.com/scholar?q={quote_plus(request.query)}&hl={language}&num=20"
         )
 
     def _parse(self, source: str) -> list[dict[str, str]]:

@@ -102,9 +102,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     crawler = SiteCrawler(acquisition, documents)
     github_token = settings.github_token.get_secret_value() if settings.github_token else None
     brave_key = (
-        settings.brave_search_api_key.get_secret_value()
-        if settings.brave_search_api_key
-        else None
+        settings.brave_search_api_key.get_secret_value() if settings.brave_search_api_key else None
     )
     openalex_key = (
         settings.openalex_api_key.get_secret_value() if settings.openalex_api_key else None
@@ -114,22 +112,16 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         if settings.semantic_scholar_api_key
         else None
     )
-    gitlab_token = (
-        settings.gitlab_token.get_secret_value() if settings.gitlab_token else None
-    )
+    gitlab_token = settings.gitlab_token.get_secret_value() if settings.gitlab_token else None
     core_key = settings.core_api_key.get_secret_value() if settings.core_api_key else None
     x_token = settings.x_bearer_token.get_secret_value() if settings.x_bearer_token else None
-    youtube_key = (
-        settings.youtube_api_key.get_secret_value() if settings.youtube_api_key else None
-    )
+    youtube_key = settings.youtube_api_key.get_secret_value() if settings.youtube_api_key else None
     x_browser = XBrowserAdapter(
         chrome_fetcher=scrapling,
         ego_fetcher=ego,
         chrome_user_data_dir=str(settings.chrome_user_data_dir),
     )
-    x_adapter = (
-        XSearchAdapter(bearer_token=x_token, fallback=x_browser) if x_token else x_browser
-    )
+    x_adapter = XSearchAdapter(bearer_token=x_token, fallback=x_browser) if x_token else x_browser
     search = MultiSourceSearchService(
         [
             GitHubSearchAdapter(token=github_token),
@@ -170,18 +162,18 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
                 ego_fetcher=ego,
                 chrome_user_data_dir=str(settings.chrome_user_data_dir),
             ),
-        ]
+        ],
+        api_timeout_seconds=settings.search_api_timeout_seconds,
+        browser_timeout_seconds=settings.search_browser_timeout_seconds,
+        cache_ttl_seconds=settings.search_cache_ttl_seconds,
+        cache_max_entries=settings.search_cache_max_entries,
     )
     model_gateway = None
     if settings.model_base_url and settings.model_name:
         model_gateway = OpenAICompatibleModelGateway(
             settings.model_base_url,
             settings.model_name,
-            api_key=(
-                settings.model_api_key.get_secret_value()
-                if settings.model_api_key
-                else None
-            ),
+            api_key=(settings.model_api_key.get_secret_value() if settings.model_api_key else None),
         )
     research = ResearchExecutionService(
         coordinator,
@@ -192,10 +184,13 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
             available_sources=search.configured_sources,
             source_channels=search.configured_source_channels,
             require_dual_channel=True,
+            browser_language_limit=settings.browser_language_limit,
         ),
         search,
+        max_concurrency=settings.research_query_concurrency,
         acquisition=acquisition,
         documents=documents,
+        max_acquisition_concurrency=settings.acquisition_concurrency,
     )
     jobs = JobQueue(database)
     return OmniRuntime(

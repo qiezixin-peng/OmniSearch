@@ -71,9 +71,7 @@ async def test_browser_search_falls_back_to_ego() -> None:
         async def fetch(self, request):
             raise RuntimeError("Chrome unavailable")
 
-    ego = FakeFetcher(
-        '<a href="https://example.org" class="result__a">Fallback result</a>'
-    )
+    ego = FakeFetcher('<a href="https://example.org" class="result__a">Fallback result</a>')
     adapter = DuckDuckGoBrowserAdapter(
         chrome_fetcher=BrokenFetcher(),
         ego_fetcher=ego,
@@ -160,3 +158,32 @@ async def test_x_browser_parser_accepts_indexed_post_fallback() -> None:
 
     assert str(results[0].url) == "https://x.com/researcher/status/456"
     assert results[0].external_identifiers == {"x_post_id": "456"}
+
+
+@pytest.mark.asyncio
+async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class RecordingFetcher(FakeFetcher):
+        async def fetch(self, request):
+            calls.append((request.mode.value, str(request.url)))
+            return await super().fetch(request)
+
+    empty = RecordingFetcher("<html><body>No posts</body></html>")
+    indexed = RecordingFetcher(
+        '<a href="https://x.com/researcher/status/789"><h3>Indexed post</h3></a>'
+    )
+    adapter = XBrowserAdapter(
+        chrome_fetcher=indexed,
+        ego_fetcher=empty,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert len(calls) == 2
+    assert calls[0][0] == "ego_browser"
+    assert calls[0][1].startswith("https://x.com/search")
+    assert calls[1][0] == "chrome_managed"
+    assert calls[1][1].startswith("https://www.google.com/search")
+    assert results[0].external_identifiers == {"x_post_id": "789"}

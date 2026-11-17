@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     runtime_dir: Path = Path(".runtime")
     chrome_user_data_dir: Path = Path(".runtime/chrome-profile")
     ego_script_dir: Path = Path(".runtime/ego-scripts")
+    search_api_timeout_seconds: float = Field(default=20.0, gt=0)
+    search_browser_timeout_seconds: float = Field(default=40.0, gt=0)
+    search_cache_ttl_seconds: float = Field(default=900.0, ge=0)
+    search_cache_max_entries: int = Field(default=2048, ge=1, le=100000)
+    research_query_concurrency: int = Field(default=8, ge=1, le=64)
+    acquisition_concurrency: int = Field(default=6, ge=1, le=32)
+    browser_language_limit: int = Field(default=2, ge=1, le=30)
 
 
 @lru_cache

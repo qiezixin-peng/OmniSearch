@@ -109,6 +109,18 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 配置 `OMNISEARCH_OTEL_EXPORTER_OTLP_ENDPOINT` 后，API、Provider 搜索与文档采集会
 输出 OpenTelemetry Trace；运行日志使用结构化 JSON。
 
+## 延迟优化策略
+
+深度研究保留 API 与浏览器双通道，但不会让所有扩展语言重复执行昂贵的浏览器搜索：
+原始语言和首个高价值扩展语言执行双通道，其余语言先走并行 API，证据缺口再由递归轮次
+补搜。相同查询会进行 15 分钟内存缓存，并将同时到达的重复请求合并为一次外部访问。
+API 与浏览器分别有独立延迟预算，慢源超时只影响自身，不阻塞其他来源。
+
+相关参数可通过 `OMNISEARCH_SEARCH_API_TIMEOUT_SECONDS`、
+`OMNISEARCH_SEARCH_BROWSER_TIMEOUT_SECONDS`、`OMNISEARCH_SEARCH_CACHE_TTL_SECONDS`、
+`OMNISEARCH_SEARCH_CACHE_MAX_ENTRIES`、`OMNISEARCH_RESEARCH_QUERY_CONCURRENCY`、
+`OMNISEARCH_ACQUISITION_CONCURRENCY` 和 `OMNISEARCH_BROWSER_LANGUAGE_LIMIT` 调整。
+
 ## REST 流程
 
 ```text

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
@@ -79,22 +80,74 @@ async def test_parallel_search_merges_cross_source_doi_and_isolates_failure() ->
         [
             FakeAdapter("crossref", [paper("crossref", "https://doi.org/10.1000/same")]),
             FakeAdapter("openalex", [paper("openalex", "https://openalex.org/W1")]),
-            FakeAdapter(
-                "arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)
-            ),
+            FakeAdapter("arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)),
         ]
     )
     response = await service.search(
-        QuickSearchCommand(
-            query="paper", sources=["crossref", "openalex", "arxiv"]
-        )
+        QuickSearchCommand(query="paper", sources=["crossref", "openalex", "arxiv"])
     )
     assert len(response.results) == 1
     assert len(response.results[0].occurrences) == 2
     assert response.failures[0].code == "RATE_LIMITED"
     assert response.failures[0].retryable is True
 
-    second = await service.search(
-        QuickSearchCommand(query="paper again", sources=["arxiv"])
-    )
+    second = await service.search(QuickSearchCommand(query="paper again", sources=["arxiv"]))
     assert second.failures[0].code == "CIRCUIT_OPEN"
+
+
+@pytest.mark.asyncio
+async def test_identical_searches_use_ttl_cache() -> None:
+    adapter = FakeAdapter("crossref", [paper("crossref", "https://doi.org/10.1000/same")])
+    calls = 0
+    original_search = adapter.search
+
+    async def counted(request: SearchRequest) -> AsyncIterator[SearchResult]:
+        nonlocal calls
+        calls += 1
+        async for result in original_search(request):
+            yield result
+
+    adapter.search = counted  # type: ignore[method-assign]
+    service = MultiSourceSearchService([adapter], cache_ttl_seconds=60)
+    command = QuickSearchCommand(query="same query", sources=["crossref"])
+
+    first = await service.search(command)
+    second = await service.search(command)
+
+    assert calls == 1
+    assert first.results == second.results
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_searches_are_coalesced() -> None:
+    class SlowAdapter(FakeAdapter):
+        calls = 0
+
+        async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            yield paper(self.source_id, "https://doi.org/10.1000/same")
+
+    adapter = SlowAdapter("crossref")
+    service = MultiSourceSearchService([adapter], cache_ttl_seconds=60)
+    command = QuickSearchCommand(query="same query", sources=["crossref"])
+
+    first, second = await asyncio.gather(service.search(command), service.search(command))
+
+    assert adapter.calls == 1
+    assert first.results == second.results
+
+
+@pytest.mark.asyncio
+async def test_slow_source_is_bounded_by_channel_timeout() -> None:
+    class SlowAdapter(FakeAdapter):
+        async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+            await asyncio.sleep(0.1)
+            yield paper(self.source_id, "https://doi.org/10.1000/same")
+
+    service = MultiSourceSearchService([SlowAdapter("crossref")], api_timeout_seconds=0.01)
+
+    response = await service.search(QuickSearchCommand(query="slow query", sources=["crossref"]))
+
+    assert response.results == []
+    assert response.failures[0].code == "TIMEOUT"

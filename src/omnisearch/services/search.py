@@ -20,11 +20,15 @@ class _SourceState:
     open_until: float = 0.0
 
 
+@dataclass
+class _CacheEntry:
+    expires_at: float
+    records: list[SearchResult]
+
+
 class QuickSearchCommand(StrictModel):
     query: str = Field(min_length=1, max_length=2000)
-    sources: list[str] = Field(
-        default_factory=lambda: ["github", "arxiv", "crossref", "openalex"]
-    )
+    sources: list[str] = Field(default_factory=lambda: ["github", "arxiv", "crossref", "openalex"])
     language: str | None = None
     max_results_per_source: int = Field(default=10, ge=1, le=100)
     domain: str | None = None
@@ -58,13 +62,30 @@ class SourceHealth(StrictModel):
 
 
 class MultiSourceSearchService:
-    def __init__(self, adapters: Iterable[ProviderAdapter]) -> None:
+    def __init__(
+        self,
+        adapters: Iterable[ProviderAdapter],
+        *,
+        api_timeout_seconds: float = 20.0,
+        browser_timeout_seconds: float = 40.0,
+        cache_ttl_seconds: float = 900.0,
+        cache_max_entries: int = 2048,
+    ) -> None:
         self._adapters = {adapter.capabilities.source_id: adapter for adapter in adapters}
         self._semaphores = {
             source_id: asyncio.Semaphore(adapter.capabilities.max_concurrency)
             for source_id, adapter in self._adapters.items()
         }
         self._states = {source_id: _SourceState() for source_id in self._adapters}
+        self.api_timeout_seconds = api_timeout_seconds
+        self.browser_timeout_seconds = browser_timeout_seconds
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.cache_max_entries = cache_max_entries
+        self._cache: dict[tuple, _CacheEntry] = {}
+        self._inflight: dict[
+            tuple, asyncio.Task[tuple[list[SearchResult], SourceFailure | None]]
+        ] = {}
+        self._cache_lock = asyncio.Lock()
 
     @property
     def available_sources(self) -> set[str]:
@@ -82,8 +103,7 @@ class MultiSourceSearchService:
     def source_channels(self) -> dict[str, Channel]:
         """Return the channel actually used by each runtime adapter."""
         return {
-            source_id: adapter.capabilities.channel
-            for source_id, adapter in self._adapters.items()
+            source_id: adapter.capabilities.channel for source_id, adapter in self._adapters.items()
         }
 
     @property
@@ -97,8 +117,7 @@ class MultiSourceSearchService:
     @staticmethod
     def _is_configured(adapter: ProviderAdapter) -> bool:
         return not adapter.capabilities.requires_credentials or any(
-            bool(getattr(adapter, name, None))
-            for name in ("api_key", "token", "bearer_token")
+            bool(getattr(adapter, name, None)) for name in ("api_key", "token", "bearer_token")
         )
 
     async def health(self) -> list[SourceHealth]:
@@ -116,8 +135,7 @@ class MultiSourceSearchService:
 
     async def search(self, command: QuickSearchCommand) -> QuickSearchResponse:
         tasks = [
-            self._search_one(source_id, command)
-            for source_id in dict.fromkeys(command.sources)
+            self._search_one(source_id, command) for source_id in dict.fromkeys(command.sources)
         ]
         outcomes = await asyncio.gather(*tasks)
         records: list[SearchResult] = []
@@ -143,6 +161,49 @@ class MultiSourceSearchService:
                 code="NOT_AVAILABLE",
                 message="source has no configured runtime adapter",
             )
+        key = self._cache_key(source_id, command)
+        now = monotonic()
+        async with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None and cached.expires_at > now:
+                return list(cached.records), None
+            if cached is not None:
+                self._cache.pop(key, None)
+            task = self._inflight.get(key)
+            if task is None:
+                task = asyncio.create_task(self._search_uncached(source_id, command, adapter))
+                self._inflight[key] = task
+        try:
+            outcome = await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._cache_lock:
+                    if self._inflight.get(key) is task:
+                        self._inflight.pop(key, None)
+        records, failure = outcome
+        if failure is None and self.cache_ttl_seconds > 0:
+            async with self._cache_lock:
+                self._prune_cache()
+                if key not in self._cache and len(self._cache) >= self.cache_max_entries:
+                    self._cache.pop(next(iter(self._cache)))
+                self._cache[key] = _CacheEntry(
+                    expires_at=monotonic() + self.cache_ttl_seconds,
+                    records=list(records),
+                )
+        return list(records), failure
+
+    def _prune_cache(self) -> None:
+        now = monotonic()
+        expired = [key for key, entry in self._cache.items() if entry.expires_at <= now]
+        for key in expired:
+            self._cache.pop(key, None)
+
+    async def _search_uncached(
+        self,
+        source_id: str,
+        command: QuickSearchCommand,
+        adapter: ProviderAdapter,
+    ) -> tuple[list[SearchResult], SourceFailure | None]:
         state = self._states[source_id]
         if state.open_until > monotonic():
             return [], SourceFailure(
@@ -177,10 +238,26 @@ class MultiSourceSearchService:
                     },
                 ):
                     search_requests.add(1, {"source.id": source_id})
-                    records = [item async for item in adapter.search(request)]
+                    timeout = (
+                        self.browser_timeout_seconds
+                        if adapter.capabilities.channel is Channel.BROWSER
+                        else self.api_timeout_seconds
+                    )
+                    async with asyncio.timeout(timeout):
+                        records = [item async for item in adapter.search(request)]
                 state.consecutive_failures = 0
                 state.open_until = 0.0
                 return records, None
+            except TimeoutError:
+                self._record_failure(source_id, "TIMEOUT", True)
+                search_failures.add(1, {"source.id": source_id, "error.code": "TIMEOUT"})
+                return [], SourceFailure(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    code="TIMEOUT",
+                    message=f"source exceeded its {timeout:g}s latency budget",
+                    retryable=True,
+                )
             except ProviderError as error:
                 self._record_failure(source_id, error.code, error.retryable)
                 search_failures.add(1, {"source.id": source_id, "error.code": error.code})
@@ -200,6 +277,16 @@ class MultiSourceSearchService:
                     code="ADAPTER_ERROR",
                     message=str(error),
                 )
+
+    @staticmethod
+    def _cache_key(source_id: str, command: QuickSearchCommand) -> tuple:
+        return (
+            source_id,
+            " ".join(command.query.casefold().split()),
+            (command.language or "").casefold(),
+            command.max_results_per_source,
+            (command.domain or "").casefold(),
+        )
 
     def _record_failure(self, source_id: str, code: str, retryable: bool) -> None:
         state = self._states[source_id]
@@ -254,6 +341,4 @@ class MultiSourceSearchService:
             and key.lower() not in {"fbclid", "gclid", "ref", "source"}
         ]
         path = parts.path.rstrip("/") or "/"
-        return urlunsplit(
-            (parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), "")
-        )
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))

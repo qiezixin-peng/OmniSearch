@@ -1,7 +1,7 @@
 import pytest
 
 from omnisearch.core.planning import SearchPlanner
-from omnisearch.domain.enums import SourceCategory
+from omnisearch.domain.enums import Channel, SourceCategory
 from omnisearch.domain.models import ResearchBudget
 from omnisearch.models import ModelResearchAnalysis, ProposedSubQuestion
 from omnisearch.providers.catalog import build_default_registry
@@ -106,6 +106,32 @@ def test_planner_excludes_runtime_sources_without_credentials() -> None:
     assert selected <= {"google", "duckduckgo", "arxiv", "crossref", "openalex"}
 
 
+def test_browser_search_is_limited_to_high_value_languages() -> None:
+    source_channels = {
+        "google": Channel.BROWSER,
+        "duckduckgo": Channel.BROWSER,
+        "brave": Channel.API,
+        "arxiv": Channel.API,
+        "crossref": Channel.API,
+        "openalex": Channel.API,
+    }
+    planner = SearchPlanner(
+        build_default_registry(),
+        source_channels=source_channels,
+        browser_language_limit=2,
+    )
+
+    plan = planner.plan("音频水印开源项目与论文")
+
+    browser_languages = {
+        query.language
+        for query in plan.queries
+        if any(source_channels.get(source) is Channel.BROWSER for source in query.sources)
+    }
+    assert browser_languages == {"zh", "en"}
+    assert {"ja", "de"} <= {query.language for query in plan.queries}
+
+
 @pytest.mark.asyncio
 async def test_model_gateway_can_add_structured_sub_questions() -> None:
     class Gateway:
@@ -125,8 +151,6 @@ async def test_model_gateway_can_add_structured_sub_questions() -> None:
 
     plan = await planner.plan_async("Suno 音频水印检测")
 
-    added = [
-        item for item in plan.sub_questions if "扩频水印" in item.objective
-    ]
+    added = [item for item in plan.sub_questions if "扩频水印" in item.objective]
     assert len(added) == 1
     assert any(query.sub_question_id == added[0].id for query in plan.queries)
