@@ -1,0 +1,130 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: omnisearch
+      POSTGRES_USER: omnisearch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omnisearch-local}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnisearch -d omnisearch"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["omnisearch-api"]
+    environment: &omnisearch-env
+      OMNISEARCH_DATABASE_URL: postgresql+psycopg://omnisearch:${POSTGRES_PASSWORD:-omnisearch-local}@postgres/omnisearch
+      OMNISEARCH_API_HOST: 0.0.0.0
+      OMNISEARCH_SERVICE_API_KEY: ${OMNISEARCH_SERVICE_API_KEY:-}
+      OMNISEARCH_GITHUB_TOKEN: ${OMNISEARCH_GITHUB_TOKEN:-}
+      OMNISEARCH_BRAVE_SEARCH_API_KEY: ${OMNISEARCH_BRAVE_SEARCH_API_KEY:-}
+      OMNISEARCH_OPENALEX_API_KEY: ${OMNISEARCH_OPENALEX_API_KEY:-}
+      OMNISEARCH_SEMANTIC_SCHOLAR_API_KEY: ${OMNISEARCH_SEMANTIC_SCHOLAR_API_KEY:-}
+      OMNISEARCH_CORE_API_KEY: ${OMNISEARCH_CORE_API_KEY:-}
+      OMNISEARCH_OBJECT_STORE_BACKEND: s3
+      OMNISEARCH_S3_ENDPOINT_URL: http://minio:9000
+      OMNISEARCH_S3_BUCKET: omnisearch
+      OMNISEARCH_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-omnisearch}
+      OMNISEARCH_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-omnisearch-storage}
+      OMNISEARCH_OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "${OMNISEARCH_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - runtime-data:/data
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["omnisearch-worker"]
+    environment: *omnisearch-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime-data:/data
+
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["omnisearch-mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8010"]
+    environment: *omnisearch-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "${OMNISEARCH_BIND_ADDRESS:-127.0.0.1}:8010:8010"
+    volumes:
+      - runtime-data:/data
+
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["omnisearch-migrate"]
+    environment: *omnisearch-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-omnisearch}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-omnisearch-storage}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        mc alias set local http://minio:9000
+        ${MINIO_ROOT_USER:-omnisearch} ${MINIO_ROOT_PASSWORD:-omnisearch-storage}
+        && mc mb --ignore-existing local/omnisearch
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${OMNISEARCH_BIND_ADDRESS:-127.0.0.1}:16686:16686"
+      - "${OMNISEARCH_BIND_ADDRESS:-127.0.0.1}:4318:4318"
+
+volumes:
+  postgres-data:
+  runtime-data:
+  minio-data:

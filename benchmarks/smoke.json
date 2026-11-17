@@ -1,0 +1,33 @@
+{
+  "name": "OmniSearch smoke benchmark",
+  "cases": [
+    {
+      "case_id": "attention-is-all-you-need",
+      "question": "找到 Attention Is All You Need 论文的原始资料",
+      "relevant_entities": [
+        [
+          "arxiv:1706.03762",
+          "https://arxiv.org/abs/1706.03762",
+          "https://arxiv.org/pdf/1706.03762"
+        ]
+      ],
+      "queries": {
+        "en": ["Attention Is All You Need arXiv 1706.03762"],
+        "zh": ["Attention Is All You Need 论文 原始资料 1706.03762"]
+      },
+      "sources": ["arxiv", "crossref", "openalex"],
+      "k": 10,
+      "max_results_per_source": 10,
+      "deep_budget": {
+        "max_rounds": 1,
+        "max_sub_questions": 8,
+        "max_queries": 8,
+        "max_languages": 3,
+        "max_sources_per_query": 6,
+        "max_results_per_source": 10,
+        "max_pages_to_fetch": 4,
+        "max_total_runtime_minutes": 5
+      }
+    }
+  ]
+}
