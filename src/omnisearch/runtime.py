@@ -122,14 +122,13 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     youtube_key = (
         settings.youtube_api_key.get_secret_value() if settings.youtube_api_key else None
     )
+    x_browser = XBrowserAdapter(
+        chrome_fetcher=scrapling,
+        ego_fetcher=ego,
+        chrome_user_data_dir=str(settings.chrome_user_data_dir),
+    )
     x_adapter = (
-        XSearchAdapter(bearer_token=x_token)
-        if x_token
-        else XBrowserAdapter(
-            chrome_fetcher=scrapling,
-            ego_fetcher=ego,
-            chrome_user_data_dir=str(settings.chrome_user_data_dir),
-        )
+        XSearchAdapter(bearer_token=x_token, fallback=x_browser) if x_token else x_browser
     )
     search = MultiSourceSearchService(
         [

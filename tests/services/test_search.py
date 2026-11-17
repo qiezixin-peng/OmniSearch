@@ -54,6 +54,25 @@ def test_arxiv_browser_pdf_url_merges_with_api_entity() -> None:
     assert MultiSourceSearchService._canonical_key(result) == "arxiv:1706.03762"
 
 
+def test_bearer_token_marks_credentialed_source_configured() -> None:
+    class BearerAdapter(FakeAdapter):
+        bearer_token = "configured"
+
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                source_id="x",
+                adapter_id="x_api",
+                category=SourceCategory.COMMUNITY,
+                channel=Channel.API,
+                requires_credentials=True,
+            )
+
+    service = MultiSourceSearchService([BearerAdapter("x")])
+
+    assert service.configured_sources == {"x"}
+
+
 @pytest.mark.asyncio
 async def test_parallel_search_merges_cross_source_doi_and_isolates_failure() -> None:
     service = MultiSourceSearchService(

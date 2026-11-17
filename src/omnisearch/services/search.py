@@ -97,7 +97,8 @@ class MultiSourceSearchService:
     @staticmethod
     def _is_configured(adapter: ProviderAdapter) -> bool:
         return not adapter.capabilities.requires_credentials or any(
-            bool(getattr(adapter, name, None)) for name in ("api_key", "token")
+            bool(getattr(adapter, name, None))
+            for name in ("api_key", "token", "bearer_token")
         )
 
     async def health(self) -> list[SourceHealth]:

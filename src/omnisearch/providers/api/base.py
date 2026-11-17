@@ -71,6 +71,8 @@ class HttpProvider:
             raise ProviderError("NETWORK_ERROR", message, retryable=True) from error
         if response.status_code == 429:
             raise ProviderError("RATE_LIMITED", f"rate limited by {url}", retryable=True)
+        if response.status_code == 402:
+            raise ProviderError("PAYMENT_REQUIRED", f"credits or payment required by {url}")
         if response.status_code in {401, 403}:
             raise ProviderError("ACCESS_DENIED", f"access denied by {url}")
         if response.status_code >= 500:

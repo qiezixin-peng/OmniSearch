@@ -21,9 +21,16 @@ def _iso(value: str | None) -> datetime | None:
 class XSearchAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.x.com/2/tweets/search/recent"
 
-    def __init__(self, *, bearer_token: str | None = None, client=None) -> None:
+    def __init__(
+        self,
+        *,
+        bearer_token: str | None = None,
+        fallback: ProviderAdapter | None = None,
+        client=None,
+    ) -> None:
         super().__init__(client=client)
         self.bearer_token = bearer_token
+        self.fallback = fallback
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -57,11 +64,23 @@ class XSearchAdapter(HttpProvider, ProviderAdapter):
             params["start_time"] = request.date_from.isoformat()
         if request.date_to:
             params["end_time"] = request.date_to.isoformat()
-        payload = await self._get_json(
-            self.endpoint,
-            params=params,
-            headers={"Authorization": f"Bearer {self.bearer_token}"},
-        )
+        try:
+            payload = await self._get_json(
+                self.endpoint,
+                params=params,
+                headers={"Authorization": f"Bearer {self.bearer_token}"},
+            )
+        except ProviderError as error:
+            if self.fallback is None or error.code not in {
+                "PAYMENT_REQUIRED",
+                "ACCESS_DENIED",
+                "RATE_LIMITED",
+            }:
+                raise
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = error.code
+                yield result
+            return
         users = {
             item["id"]: item
             for item in (payload.get("includes") or {}).get("users", [])

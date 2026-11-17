@@ -3,7 +3,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from omnisearch.domain.models import SearchRequest
+from omnisearch.domain.enums import Channel, SourceCategory
+from omnisearch.domain.models import ProviderCapabilities, SearchRequest, SearchResult
 from omnisearch.providers.api import (
     ArxivAdapter,
     BlueskyAdapter,
@@ -23,6 +24,7 @@ from omnisearch.providers.api import (
     XSearchAdapter,
     YouTubeAdapter,
 )
+from omnisearch.providers.base import ProviderAdapter
 
 
 def request() -> SearchRequest:
@@ -402,3 +404,40 @@ async def test_x_youtube_and_huggingface_normalization() -> None:
     assert x_results[0].external_identifiers == {"x_post_id": "100"}
     assert youtube_results[0].external_identifiers == {"youtube_video_id": "v1"}
     assert huggingface_results[0].title == "lab/watermark-detector"
+
+
+@pytest.mark.asyncio
+async def test_x_api_falls_back_to_browser_when_credits_are_depleted() -> None:
+    class BrowserFallback(ProviderAdapter):
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                source_id="x",
+                adapter_id="x_browser",
+                category=SourceCategory.COMMUNITY,
+                channel=Channel.BROWSER,
+            )
+
+        async def search(self, incoming: SearchRequest):
+            yield SearchResult(
+                source_id="x",
+                adapter_id="x_browser",
+                channel=Channel.BROWSER,
+                result_type="social_post",
+                title="Indexed X post",
+                url="https://x.com/example/status/1",
+            )
+
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(402, json={"detail": "credits depleted"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = [
+            item
+            async for item in XSearchAdapter(
+                bearer_token="token", fallback=BrowserFallback(), client=client
+            ).search(request())
+        ]
+
+    assert results[0].channel is Channel.BROWSER
+    assert results[0].raw_payload["api_fallback_reason"] == "PAYMENT_REQUIRED"
