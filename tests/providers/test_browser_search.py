@@ -9,6 +9,7 @@ from omnisearch.providers.browser import (
     GoogleBrowserAdapter,
     GooglePatentsBrowserAdapter,
     GoogleScholarBrowserAdapter,
+    XBrowserAdapter,
 )
 
 
@@ -122,3 +123,40 @@ async def test_google_patents_parser_resolves_state_modifier_result() -> None:
     assert str(results[0].url) == "https://patents.google.com/patent/US8923548B2/en"
     assert results[0].external_identifiers == {"patent": "US8923548B2"}
     assert results[0].result_type == "patent"
+
+
+@pytest.mark.asyncio
+async def test_x_browser_parser_supports_authenticated_rendered_timeline() -> None:
+    source = """<article data-testid="tweet">
+    <a href="/researcher/status/123"><time>now</time></a>
+    <div data-testid="tweetText">Primary technical announcement</div>
+    </article>"""
+    fetcher = FakeFetcher(source)
+    adapter = XBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].source_id == "x"
+    assert results[0].snippet == "Primary technical announcement"
+    assert results[0].external_identifiers == {"x_post_id": "123"}
+
+
+@pytest.mark.asyncio
+async def test_x_browser_parser_accepts_indexed_post_fallback() -> None:
+    source = """<a href="https://x.com/researcher/status/456">
+    <h3>Indexed primary announcement</h3></a>"""
+    fetcher = FakeFetcher(source)
+    adapter = XBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert str(results[0].url) == "https://x.com/researcher/status/456"
+    assert results[0].external_identifiers == {"x_post_id": "456"}

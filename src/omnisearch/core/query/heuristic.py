@@ -33,7 +33,20 @@ class HeuristicQueryAnalyzer:
     def categories(self, text: str) -> set[SourceCategory]:
         lowered = text.lower()
         categories = {SourceCategory.WEB}
-        if any(term in lowered for term in ("github", "开源", "代码", "repository", "source code")):
+        if any(
+            term in lowered
+            for term in (
+                "github",
+                "hugging face",
+                "huggingface",
+                "model card",
+                "开源",
+                "代码",
+                "模型仓库",
+                "repository",
+                "source code",
+            )
+        ):
             categories.add(SourceCategory.CODE)
         if any(
             term in lowered
@@ -51,10 +64,30 @@ class HeuristicQueryAnalyzer:
                 "paper",
                 "research",
                 "algorithm",
+                "biomedical",
+                "clinical",
+                "医学",
+                "生物医学",
             )
         ):
             categories.add(SourceCategory.ACADEMIC)
-        if any(term in lowered for term in ("社区", "讨论", "经验", "reddit", "forum")):
+        if any(
+            term in lowered
+            for term in (
+                "社区",
+                "讨论",
+                "经验",
+                "舆情",
+                "社交平台",
+                "reddit",
+                "forum",
+                "twitter",
+                "bluesky",
+                "hacker news",
+                "x.com",
+                "x 平台",
+            )
+        ):
             categories.add(SourceCategory.COMMUNITY)
         if any(term in lowered for term in ("专利", "patent")):
             categories.add(SourceCategory.PATENT)

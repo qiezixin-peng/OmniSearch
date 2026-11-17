@@ -46,42 +46,46 @@ class BrowserSearchAdapter(ProviderAdapter):
         )
 
     async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
-        url = self._search_url(request)
         failures: list[str] = []
         document = None
         parsed_items: list[dict[str, str]] = []
-        for fetcher, mode in (
-            (self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-            (self.ego_fetcher, FetchMode.EGO_BROWSER),
-        ):
-            try:
-                document = await fetcher.fetch(
-                    FetchRequest(
-                        url=url,
-                        mode=mode,
-                        chrome_user_data_dir=(
-                            self.chrome_user_data_dir
-                            if mode is FetchMode.CHROME_MANAGED
-                            else None
-                        ),
-                        ego_task_name=f"OmniSearch {self.source_id} search",
-                        solve_cloudflare=True,
-                        network_idle=True,
-                        main_content_only=False,
+        for url in self._search_urls(request):
+            for fetcher, mode in (
+                (self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+                (self.ego_fetcher, FetchMode.EGO_BROWSER),
+            ):
+                try:
+                    document = await fetcher.fetch(
+                        FetchRequest(
+                            url=url,
+                            mode=mode,
+                            chrome_user_data_dir=(
+                                self.chrome_user_data_dir
+                                if mode is FetchMode.CHROME_MANAGED
+                                else None
+                            ),
+                            ego_task_name=f"OmniSearch {self.source_id} search",
+                            solve_cloudflare=True,
+                            network_idle=True,
+                            main_content_only=False,
+                        )
                     )
-                )
-                if document.raw_html:
-                    candidates = self._parse(document.raw_html)
-                    parsed_items = [
-                        prepared
-                        for item in candidates
-                        if (prepared := await self._prepare_item(item)) is not None
-                    ]
-                if parsed_items:
-                    break
-                failures.append(f"{mode.value}: no search results found in returned page")
-            except Exception as error:
-                failures.append(f"{mode.value}: {error}")
+                    if document.raw_html:
+                        candidates = self._parse(document.raw_html)
+                        parsed_items = [
+                            prepared
+                            for item in candidates
+                            if (prepared := await self._prepare_item(item)) is not None
+                        ]
+                    if parsed_items:
+                        break
+                    failures.append(
+                        f"{mode.value} {url}: no search results found in returned page"
+                    )
+                except Exception as error:
+                    failures.append(f"{mode.value} {url}: {error}")
+            if parsed_items:
+                break
         if document is None or not parsed_items:
             raise ProviderError(
                 "BROWSER_SEARCH_FAILED",
@@ -114,6 +118,9 @@ class BrowserSearchAdapter(ProviderAdapter):
 
     def _search_url(self, request: SearchRequest) -> str:
         raise NotImplementedError
+
+    def _search_urls(self, request: SearchRequest) -> list[str]:
+        return [self._search_url(request)]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         raise NotImplementedError
@@ -198,6 +205,73 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
                     snippet = " ".join(snippets[0].itertext()).strip()
             if title and href.startswith(("http://", "https://")):
                 records.append({"title": title, "url": href, "snippet": snippet})
+        return records
+
+
+class XBrowserAdapter(BrowserSearchAdapter):
+    source_id = "x"
+    adapter_id = "x_browser"
+    category = SourceCategory.COMMUNITY
+    result_type = "social_post"
+    search_capabilities = {"post", "author", "conversation", "recent"}
+
+    def _search_url(self, request: SearchRequest) -> str:
+        return f"https://x.com/search?q={quote_plus(request.query)}&src=typed_query&f=live"
+
+    def _search_urls(self, request: SearchRequest) -> list[str]:
+        language = (request.language or "en").split("-", 1)[0]
+        return [
+            self._search_url(request),
+            (
+                "https://www.google.com/search?q="
+                f"{quote_plus(request.query + ' site:x.com/*/status')}&hl={language}&num=20"
+            ),
+        ]
+
+    def _parse(self, source: str) -> list[dict[str, str]]:
+        tree = html.fromstring(source)
+        records: list[dict[str, str]] = []
+        for article in tree.cssselect('article[data-testid="tweet"]'):
+            status_links = article.cssselect('a[href*="/status/"]')
+            if not status_links:
+                continue
+            href = status_links[0].get("href", "")
+            text_nodes = article.cssselect('[data-testid="tweetText"]')
+            text = " ".join(text_nodes[0].itertext()).strip() if text_nodes else ""
+            username = href.split("/", 2)[1] if href.startswith("/") else "x"
+            if href.startswith("/"):
+                href = "https://x.com" + href
+            if href.startswith("https://x.com/"):
+                records.append(
+                    {
+                        "title": f"@{username}: {text[:140] or 'X post'}",
+                        "url": href,
+                        "snippet": text,
+                        "external_id_name": "x_post_id",
+                        "external_id": href.rsplit("/", 1)[-1],
+                    }
+                )
+        if records:
+            return records
+        for anchor in tree.xpath("//a[.//h3]"):
+            href = anchor.get("href", "")
+            if href.startswith("/url?"):
+                href = parse_qs(urlparse(href).query).get("q", [""])[0]
+            parsed = urlparse(href)
+            if parsed.netloc.removeprefix("www.") not in {"x.com", "twitter.com"}:
+                continue
+            if "/status/" not in parsed.path:
+                continue
+            title = " ".join(anchor.xpath(".//h3//text()")).strip()
+            records.append(
+                {
+                    "title": title or "X post",
+                    "url": href,
+                    "snippet": "",
+                    "external_id_name": "x_post_id",
+                    "external_id": parsed.path.rsplit("/", 1)[-1],
+                }
+            )
         return records
 
 

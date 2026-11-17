@@ -8,21 +8,30 @@ from omnisearch.models import OpenAICompatibleModelGateway
 from omnisearch.observability import configure_observability
 from omnisearch.providers.api import (
     ArxivAdapter,
+    BlueskyAdapter,
     BraveSearchAdapter,
     CoreAdapter,
     CrossrefAdapter,
+    EuropePmcAdapter,
+    GdeltAdapter,
     GitHubSearchAdapter,
     GitLabAdapter,
+    HackerNewsAdapter,
+    HuggingFaceAdapter,
+    InternetArchiveAdapter,
     OpenAlexAdapter,
     RedditAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
+    XSearchAdapter,
+    YouTubeAdapter,
 )
 from omnisearch.providers.browser import (
     DuckDuckGoBrowserAdapter,
     GoogleBrowserAdapter,
     GooglePatentsBrowserAdapter,
     GoogleScholarBrowserAdapter,
+    XBrowserAdapter,
 )
 from omnisearch.providers.catalog import build_default_registry
 from omnisearch.providers.registry import SourceRegistry
@@ -109,6 +118,19 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         settings.gitlab_token.get_secret_value() if settings.gitlab_token else None
     )
     core_key = settings.core_api_key.get_secret_value() if settings.core_api_key else None
+    x_token = settings.x_bearer_token.get_secret_value() if settings.x_bearer_token else None
+    youtube_key = (
+        settings.youtube_api_key.get_secret_value() if settings.youtube_api_key else None
+    )
+    x_adapter = (
+        XSearchAdapter(bearer_token=x_token)
+        if x_token
+        else XBrowserAdapter(
+            chrome_fetcher=scrapling,
+            ego_fetcher=ego,
+            chrome_user_data_dir=str(settings.chrome_user_data_dir),
+        )
+    )
     search = MultiSourceSearchService(
         [
             GitHubSearchAdapter(token=github_token),
@@ -120,6 +142,14 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
             GitLabAdapter(token=gitlab_token),
             RedditAdapter(),
             CoreAdapter(api_key=core_key),
+            x_adapter,
+            BlueskyAdapter(),
+            HackerNewsAdapter(),
+            HuggingFaceAdapter(),
+            EuropePmcAdapter(),
+            GdeltAdapter(),
+            InternetArchiveAdapter(),
+            YouTubeAdapter(api_key=youtube_key),
             BraveSearchAdapter(api_key=brave_key),
             GoogleBrowserAdapter(
                 chrome_fetcher=scrapling,

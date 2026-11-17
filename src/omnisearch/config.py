@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     semantic_scholar_api_key: SecretStr | None = None
     gitlab_token: SecretStr | None = None
     core_api_key: SecretStr | None = None
+    x_bearer_token: SecretStr | None = None
+    youtube_api_key: SecretStr | None = None
     model_base_url: str | None = None
     model_name: str | None = None
     model_api_key: SecretStr | None = None

@@ -3,6 +3,7 @@ from omnisearch.providers.browser.search_engines import (
     GoogleBrowserAdapter,
     GooglePatentsBrowserAdapter,
     GoogleScholarBrowserAdapter,
+    XBrowserAdapter,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "GoogleBrowserAdapter",
     "GooglePatentsBrowserAdapter",
     "GoogleScholarBrowserAdapter",
+    "XBrowserAdapter",
 ]

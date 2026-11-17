@@ -11,6 +11,8 @@ REST、MCP 或 CLI 自动调用 OmniSearch，并取得可追溯的资料和证�
 - Google、DuckDuckGo、Google Scholar 真实 Chrome 搜索及 ego-browser 降级；
 - GitHub、arXiv、Crossref、OpenAlex、Semantic Scholar、Stack Exchange、GitLab、Reddit、
   CORE、Brave 的真实 API Adapter（需要密钥的来源会明确报告 `NOT_CONFIGURED`）；
+- X（API 或授权浏览器）、Bluesky、Hacker News、Hugging Face、Europe PMC、GDELT、
+  Internet Archive 与 YouTube 等高增益专业来源；
 - 启发式及可选模型驱动的问题拆解、动态多语言查询和来源规划；
 - 并行搜索、跨来源去重、缺口分析、递归补搜和预算终止；
 - HTML/PDF 深度采集、SSRF 防护、正文版本化与重叠分块；

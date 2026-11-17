@@ -6,14 +6,22 @@ import pytest
 from omnisearch.domain.models import SearchRequest
 from omnisearch.providers.api import (
     ArxivAdapter,
+    BlueskyAdapter,
     CoreAdapter,
     CrossrefAdapter,
+    EuropePmcAdapter,
+    GdeltAdapter,
     GitHubSearchAdapter,
     GitLabAdapter,
+    HackerNewsAdapter,
+    HuggingFaceAdapter,
+    InternetArchiveAdapter,
     OpenAlexAdapter,
     RedditAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
+    XSearchAdapter,
+    YouTubeAdapter,
 )
 
 
@@ -253,3 +261,144 @@ async def test_additional_pool_adapters_normalize_results(
 
     assert results[0].source_id == expected_source
     assert str(results[0].url).startswith("https://")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_factory", "payload", "expected_source"),
+    [
+        (
+            BlueskyAdapter,
+            {
+                "posts": [
+                    {
+                        "uri": "at://did:plc:abc/app.bsky.feed.post/r1",
+                        "author": {"handle": "researcher.test", "displayName": "Researcher"},
+                        "record": {"text": "New watermark research", "langs": ["en"]},
+                    }
+                ]
+            },
+            "bluesky",
+        ),
+        (
+            HackerNewsAdapter,
+            {
+                "hits": [
+                    {
+                        "objectID": "42",
+                        "title": "Audio watermark release",
+                        "author": "dev",
+                    }
+                ]
+            },
+            "hacker_news",
+        ),
+        (
+            EuropePmcAdapter,
+            {
+                "resultList": {
+                    "result": [
+                        {
+                            "pmid": "123",
+                            "source": "MED",
+                            "title": "Clinical watermark study",
+                            "doi": "10.1/example",
+                        }
+                    ]
+                }
+            },
+            "europe_pmc",
+        ),
+        (
+            GdeltAdapter,
+            {
+                "articles": [
+                    {
+                        "url": "https://news.example/research",
+                        "title": "Research announcement",
+                        "language": "English",
+                    }
+                ]
+            },
+            "gdelt",
+        ),
+        (
+            InternetArchiveAdapter,
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "identifier": "historic-audio-paper",
+                            "title": "Historic Audio Paper",
+                            "mediatype": "texts",
+                        }
+                    ]
+                }
+            },
+            "internet_archive",
+        ),
+    ],
+)
+async def test_high_value_discovery_adapters_normalize_results(
+    adapter_factory, payload, expected_source
+) -> None:
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = [item async for item in adapter_factory(client=client).search(request())]
+
+    assert results[0].source_id == expected_source
+    assert str(results[0].url).startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_x_youtube_and_huggingface_normalization() -> None:
+    payloads = {
+        "api.x.com": {
+            "data": [
+                {
+                    "id": "100",
+                    "text": "Official product announcement",
+                    "author_id": "u1",
+                    "lang": "en",
+                }
+            ],
+            "includes": {"users": [{"id": "u1", "username": "company"}]},
+        },
+        "googleapis.com": {
+            "items": [
+                {
+                    "id": {"videoId": "v1"},
+                    "snippet": {"title": "Technical talk", "channelTitle": "Lab"},
+                }
+            ]
+        },
+        "huggingface.co": [
+            {"modelId": "lab/watermark-detector", "downloads": 50, "likes": 3}
+        ],
+    }
+
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        host = incoming.url.host
+        key = "googleapis.com" if "googleapis.com" in host else host
+        return httpx.Response(200, json=payloads[key])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        x_results = [
+            item
+            async for item in XSearchAdapter(
+                bearer_token="token", client=client
+            ).search(request())
+        ]
+        youtube_results = [
+            item
+            async for item in YouTubeAdapter(api_key="key", client=client).search(request())
+        ]
+        huggingface_results = [
+            item async for item in HuggingFaceAdapter(client=client).search(request())
+        ]
+
+    assert x_results[0].external_identifiers == {"x_post_id": "100"}
+    assert youtube_results[0].external_identifiers == {"youtube_video_id": "v1"}
+    assert huggingface_results[0].title == "lab/watermark-detector"
