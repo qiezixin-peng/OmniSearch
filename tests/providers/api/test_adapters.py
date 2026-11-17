@@ -6,6 +6,7 @@ import pytest
 from omnisearch.domain.models import SearchRequest
 from omnisearch.providers.api import (
     ArxivAdapter,
+    CoreAdapter,
     CrossrefAdapter,
     GitHubSearchAdapter,
     GitLabAdapter,
@@ -142,6 +143,39 @@ async def test_crossref_and_openalex_expose_doi_for_cross_source_dedup() -> None
         ]
     assert crossref[0].external_identifiers["doi"] == "10.1000/example"
     assert openalex[0].external_identifiers["doi"] == "10.1000/example"
+
+
+@pytest.mark.asyncio
+async def test_core_normalizes_structured_language_and_mixed_authors() -> None:
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        assert incoming.headers["Authorization"] == "Bearer test-key"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 123,
+                        "title": "Audio Watermark Detection",
+                        "downloadUrl": "https://example.org/paper.pdf",
+                        "language": {"code": "en", "name": "English"},
+                        "authors": [{"name": "A. Researcher"}, "B. Author"],
+                    }
+                ]
+            },
+        )
+
+    limited_request = request().model_copy(update={"max_results": 1})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = [
+            item
+            async for item in CoreAdapter(api_key="test-key", client=client).search(
+                limited_request
+            )
+        ]
+    assert len(results) == 1
+    assert results[0].original_language == "en"
+    assert results[0].authors == ["A. Researcher", "B. Author"]
+    assert results[0].external_identifiers == {"core": "123"}
 
 
 @pytest.mark.asyncio

@@ -285,8 +285,19 @@ class CoreAdapter(HttpProvider, ProviderAdapter):
         if not self.api_key:
             raise ProviderError("NOT_CONFIGURED", "CORE API key is not configured")
         try:
-            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-                response = await client.post(
+            if self._client is None:
+                async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                    response = await client.post(
+                        self.endpoint,
+                        params={
+                            "limit": request.max_results,
+                            "offset": int(request.cursor or 0),
+                        },
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        json={"q": request.query},
+                    )
+            else:
+                response = await self._client.post(
                     self.endpoint,
                     params={"limit": request.max_results, "offset": int(request.cursor or 0)},
                     headers={"Authorization": f"Bearer {self.api_key}"},
@@ -296,7 +307,14 @@ class CoreAdapter(HttpProvider, ProviderAdapter):
             payload = response.json()
         except httpx.HTTPError as error:
             raise ProviderError("NETWORK_ERROR", str(error), retryable=True) from error
-        for item in payload.get("results", []):
+        for item in payload.get("results", [])[: request.max_results]:
+            language = item.get("language")
+            if isinstance(language, dict):
+                language = language.get("code") or language.get("name")
+            authors = [
+                author.get("name", "") if isinstance(author, dict) else str(author)
+                for author in item.get("authors", [])
+            ]
             fulltext_urls = item.get("sourceFulltextUrls") or []
             url = item.get("downloadUrl") or (fulltext_urls[0] if fulltext_urls else None)
             if not url:
@@ -308,9 +326,11 @@ class CoreAdapter(HttpProvider, ProviderAdapter):
                 result_type="paper",
                 title=item.get("title") or "Untitled",
                 url=url,
-                original_language=item.get("language") or None,
+                original_language=language or None,
                 snippet=item.get("abstract"),
-                authors=[author.get("name", "") for author in item.get("authors", [])],
-                external_identifiers={"core": str(item.get("id"))},
+                authors=authors,
+                external_identifiers=(
+                    {"core": str(item["id"])} if item.get("id") is not None else {}
+                ),
                 raw_payload={"doi": item.get("doi"), "year": item.get("yearPublished")},
             )

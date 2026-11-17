@@ -3,13 +3,15 @@ import asyncio
 import os
 import socket
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 
 from omnisearch.core.evidence import EvidenceEvaluator, EvidenceItem
-from omnisearch.domain.enums import ResearchStatus
-from omnisearch.domain.models import ResearchBudget, ResearchCreate
+from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
+from omnisearch.domain.enums import ResearchStatus, SourceCategory
+from omnisearch.domain.models import ResearchBudget, ResearchCreate, StrictModel
 from omnisearch.quality import evaluate_quality
 from omnisearch.runtime import OmniRuntime, build_runtime
 from omnisearch.services.acquisition import AcquisitionRequest
@@ -29,6 +31,93 @@ mcp = MCPServer(
 
 _runtime: OmniRuntime | None = None
 _background_tasks: set[asyncio.Task[Any]] = set()
+
+
+class AgentSubQuestion(StrictModel):
+    key: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$")
+    objective: str = Field(min_length=3, max_length=1000)
+    categories: set[SourceCategory] = Field(default_factory=lambda: {SourceCategory.WEB})
+    evidence_requirements: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class AgentPlannedQuery(StrictModel):
+    sub_question_key: str
+    language: str = Field(min_length=2, max_length=35)
+    query: str = Field(min_length=1, max_length=2000)
+    sources: list[str] = Field(min_length=1)
+    purpose: str = Field(default="agent-supplied research query", max_length=1000)
+
+
+def _build_agent_plan(
+    engine: OmniRuntime,
+    question: str,
+    original_language: str,
+    budget: ResearchBudget,
+    sub_questions: list[AgentSubQuestion],
+    queries: list[AgentPlannedQuery],
+) -> ResearchPlan:
+    if not sub_questions or not queries:
+        raise ValueError("agent-supplied planning requires both sub_questions and queries")
+    if len(sub_questions) > budget.max_sub_questions:
+        raise ValueError("agent plan exceeds max_sub_questions")
+    if len(queries) > budget.max_queries:
+        raise ValueError("agent plan exceeds max_queries")
+    keys = [item.key for item in sub_questions]
+    if len(keys) != len(set(keys)):
+        raise ValueError("agent sub-question keys must be unique")
+    key_ids = {key: uuid4() for key in keys}
+    known = set(key_ids)
+    for item in sub_questions:
+        unknown = set(item.depends_on) - known
+        if unknown:
+            raise ValueError(f"unknown sub-question dependencies: {sorted(unknown)}")
+        if item.key in item.depends_on:
+            raise ValueError(f"sub-question cannot depend on itself: {item.key}")
+    query_keys = {item.sub_question_key for item in queries}
+    unknown_query_keys = query_keys - known
+    if unknown_query_keys:
+        raise ValueError(f"queries reference unknown sub-questions: {sorted(unknown_query_keys)}")
+    missing_queries = known - query_keys
+    if missing_queries:
+        raise ValueError(f"sub-questions without queries: {sorted(missing_queries)}")
+    requested_sources = {source for query in queries for source in query.sources}
+    unknown_sources = requested_sources - engine.search.available_sources
+    if unknown_sources:
+        raise ValueError(f"unknown search sources: {sorted(unknown_sources)}")
+    unconfigured_sources = requested_sources - engine.search.configured_sources
+    if unconfigured_sources:
+        raise ValueError(f"search sources are not configured: {sorted(unconfigured_sources)}")
+    language = (
+        original_language
+        if original_language != "auto"
+        else engine.research.planner.analyzer.detect_language(question)
+    )
+    return ResearchPlan(
+        question=question,
+        original_language=language,
+        budget=budget,
+        sub_questions=[
+            PlannedSubQuestion(
+                id=key_ids[item.key],
+                objective=item.objective,
+                categories=item.categories,
+                evidence_requirements=item.evidence_requirements,
+                depends_on=[key_ids[key] for key in item.depends_on],
+            )
+            for item in sub_questions
+        ],
+        queries=[
+            PlannedQuery(
+                sub_question_id=key_ids[item.sub_question_key],
+                language=item.language,
+                query=item.query,
+                sources=list(dict.fromkeys(item.sources)),
+                purpose=item.purpose,
+            )
+            for item in queries
+        ],
+    )
 
 
 def runtime() -> OmniRuntime:
@@ -141,26 +230,50 @@ async def research_start(
     max_rounds: int = 3,
     max_queries: int = 40,
     max_pages_to_fetch: int = 30,
+    sub_questions: list[AgentSubQuestion] | None = None,
+    queries: list[AgentPlannedQuery] | None = None,
 ) -> dict[str, Any]:
     engine = runtime()
+    if (sub_questions is None) != (queries is None):
+        raise ValueError("provide both sub_questions and queries, or neither")
+    budget = ResearchBudget(
+        max_rounds=max_rounds,
+        max_queries=max_queries,
+        max_pages_to_fetch=max_pages_to_fetch,
+    )
     task = engine.coordinator.create(
         ResearchCreate(
             question=question,
             original_language=original_language,
-            budget=ResearchBudget(
-                max_rounds=max_rounds,
-                max_queries=max_queries,
-                max_pages_to_fetch=max_pages_to_fetch,
-            ),
+            budget=budget,
         )
     )
+    planning_mode = "heuristic_fallback"
+    if sub_questions is not None and queries is not None:
+        plan = _build_agent_plan(
+            engine,
+            question,
+            original_language,
+            budget,
+            sub_questions,
+            queries,
+        )
+        engine.repository.apply_plan(task.id, plan)
+        planning_mode = "agent_supplied"
     job_id = engine.jobs.enqueue(
         "research.execute",
         {"research_id": str(task.id)},
         idempotency_key=f"research.execute:{task.id}",
     )
     _schedule_worker()
-    return {"research_id": str(task.id), "job_id": str(job_id), "status": "scheduled"}
+    return {
+        "research_id": str(task.id),
+        "job_id": str(job_id),
+        "status": "scheduled",
+        "planning_mode": planning_mode,
+        "sub_questions_count": len(sub_questions or []),
+        "queries_count": len(queries or []),
+    }
 
 
 @mcp.tool(description="Continue a partially completed persisted research task.")

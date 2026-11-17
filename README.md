@@ -94,6 +94,11 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 `verify_claim`、`list_sources`
 、`get_source_health` 和 `evaluate_search_quality`。
 
+`research_start` 优先接受调用 Agent 已经生成的 `sub_questions` 和 `queries`。每个子问题
+使用 Agent 自定义的短 `key` 建立依赖，查询显式指定语言、搜索表达、来源和目的；服务端
+将其映射为持久化 UUID 并校验预算及 Provider 配置。若 Agent 只传入 `question`，系统才
+使用确定性的启发式拆解兜底，不要求连接任何外部模型。
+
 配置 `OMNISEARCH_OTEL_EXPORTER_OTLP_ENDPOINT` 后，API、Provider 搜索与文档采集会
 输出 OpenTelemetry Trace；运行日志使用结构化 JSON。
 
