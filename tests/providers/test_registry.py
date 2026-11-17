@@ -19,7 +19,7 @@ def test_default_pool_contains_required_sources() -> None:
 def test_google_has_chrome_and_ego_adapters() -> None:
     google = build_default_registry().get("google")
     assert {adapter.backend for adapter in google.adapters} == {
-        "scrapling_chrome",
+        "patchright_chrome+scrapling_chrome+ego_browser+camoufox",
         "ego_browser",
     }
 

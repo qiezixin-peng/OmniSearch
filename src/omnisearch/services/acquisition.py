@@ -40,9 +40,11 @@ class DocumentAcquisitionService:
         chrome_fetcher: ContentFetcher,
         ego_fetcher: ContentFetcher,
         chrome_profile_root: Path,
+        browser_fallback_fetchers: tuple[ContentFetcher, ...] = (),
     ) -> None:
         self.http_fetcher = http_fetcher
         self.chrome_fetcher = chrome_fetcher
+        self.browser_fetchers = (chrome_fetcher, *browser_fallback_fetchers)
         self.ego_fetcher = ego_fetcher
         self.chrome_profile_root = chrome_profile_root
 
@@ -112,7 +114,8 @@ class DocumentAcquisitionService:
     def _fetch_chain(self, command: AcquisitionRequest):
         yield FetchMode.HTTP, self.http_fetcher
         if command.use_browser_fallback:
-            yield FetchMode.CHROME_MANAGED, self.chrome_fetcher
+            for fetcher in self.browser_fetchers:
+                yield FetchMode.CHROME_MANAGED, fetcher
             yield FetchMode.EGO_BROWSER, self.ego_fetcher
 
     async def _fetch_pdf(self, command: AcquisitionRequest) -> AcquiredDocument:

@@ -69,6 +69,7 @@ class EgoBrowserFetcher(ContentFetcher):
         task_name = json.dumps(request.ego_task_name, ensure_ascii=False)
         url = json.dumps(str(request.url))
         timeout = request.timeout_ms
+        wait_after_load = request.wait_after_load_ms
         marker = json.dumps(self._result_marker)
         return f"""const SPACE_ID = {space_id};
 const entry = SPACE_ID === null
@@ -86,6 +87,7 @@ const page = pages[0] ?? await task.adopt((await task.tabs())[0].page);
 try {{
   await page.goto({url}, {{ timeout: {timeout} }});
   await page.waitForLoadState("domcontentloaded");
+  if ({wait_after_load} > 0) await page.waitForTimeout({wait_after_load});
   const content = await page.evaluate(() => {{
     const root = document.querySelector("main, article") ?? document.body;
     return {{
@@ -118,7 +120,16 @@ try {{
             )
         except FileNotFoundError as error:
             raise EgoBrowserUnavailable("ego-browser executable was not found") from error
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+            raise
         return (
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),

@@ -2,6 +2,7 @@ import asyncio
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import monotonic
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -18,6 +19,11 @@ from omnisearch.providers.base import ProviderAdapter, ProviderError
 class _SourceState:
     consecutive_failures: int = 0
     open_until: float = 0.0
+    next_allowed_at: float = 0.0
+    last_failure_code: str | None = None
+    last_error: str | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
 
 
 @dataclass
@@ -59,6 +65,13 @@ class SourceHealth(StrictModel):
     adapter_id: str
     configured: bool
     healthy: bool
+    status: str
+    circuit_open: bool = False
+    consecutive_failures: int = 0
+    last_failure_code: str | None = None
+    last_error: str | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
 
 
 class MultiSourceSearchService:
@@ -132,12 +145,39 @@ class MultiSourceSearchService:
     async def health(self) -> list[SourceHealth]:
         async def inspect(adapter: ProviderAdapter) -> SourceHealth:
             configured = self._is_configured(adapter)
-            healthy = configured and await adapter.healthcheck()
+            state = self._states[adapter.capabilities.source_id]
+            circuit_open = state.open_until > monotonic()
+            check_ok = False
+            if configured and not circuit_open:
+                try:
+                    async with asyncio.timeout(5):
+                        check_ok = await adapter.healthcheck()
+                except Exception:
+                    check_ok = False
+            healthy = configured and not circuit_open and check_ok
+            status = (
+                "not_configured"
+                if not configured
+                else "circuit_open"
+                if circuit_open
+                else "degraded"
+                if state.consecutive_failures
+                else "healthy"
+                if healthy
+                else "unreachable"
+            )
             return SourceHealth(
                 source_id=adapter.capabilities.source_id,
                 adapter_id=adapter.capabilities.adapter_id,
                 configured=configured,
                 healthy=healthy,
+                status=status,
+                circuit_open=circuit_open,
+                consecutive_failures=state.consecutive_failures,
+                last_failure_code=state.last_failure_code,
+                last_error=state.last_error,
+                last_success_at=state.last_success_at,
+                last_failure_at=state.last_failure_at,
             )
 
         return await asyncio.gather(*(inspect(adapter) for adapter in self._adapters.values()))
@@ -239,6 +279,11 @@ class MultiSourceSearchService:
                     retryable=True,
                 )
             try:
+                minimum_interval = float(getattr(adapter, "min_interval_seconds", 0.0))
+                delay = state.next_allowed_at - monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                state.next_allowed_at = monotonic() + minimum_interval
                 with tracer.start_as_current_span(
                     "provider.search",
                     attributes={
@@ -256,19 +301,23 @@ class MultiSourceSearchService:
                         records = [item async for item in adapter.search(request)]
                 state.consecutive_failures = 0
                 state.open_until = 0.0
+                state.last_failure_code = None
+                state.last_error = None
+                state.last_success_at = datetime.now(UTC)
                 return records, None
             except TimeoutError:
-                self._record_failure(source_id, "TIMEOUT", True)
+                message = f"source exceeded its {timeout:g}s latency budget"
+                self._record_failure(source_id, "TIMEOUT", True, message)
                 search_failures.add(1, {"source.id": source_id, "error.code": "TIMEOUT"})
                 return [], SourceFailure(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
                     code="TIMEOUT",
-                    message=f"source exceeded its {timeout:g}s latency budget",
+                    message=message,
                     retryable=True,
                 )
             except ProviderError as error:
-                self._record_failure(source_id, error.code, error.retryable)
+                self._record_failure(source_id, error.code, error.retryable, str(error))
                 search_failures.add(1, {"source.id": source_id, "error.code": error.code})
                 return [], SourceFailure(
                     source_id=source_id,
@@ -278,7 +327,7 @@ class MultiSourceSearchService:
                     retryable=error.retryable,
                 )
             except Exception as error:  # isolate an adapter bug from other sources
-                self._record_failure(source_id, "ADAPTER_ERROR", False)
+                self._record_failure(source_id, "ADAPTER_ERROR", False, str(error))
                 search_failures.add(1, {"source.id": source_id, "error.code": "ADAPTER_ERROR"})
                 return [], SourceFailure(
                     source_id=source_id,
@@ -297,12 +346,23 @@ class MultiSourceSearchService:
             (command.domain or "").casefold(),
         )
 
-    def _record_failure(self, source_id: str, code: str, retryable: bool) -> None:
+    def _record_failure(
+        self, source_id: str, code: str, retryable: bool, message: str | None = None
+    ) -> None:
         state = self._states[source_id]
         state.consecutive_failures += 1
+        state.last_failure_code = code
+        state.last_error = message
+        state.last_failure_at = datetime.now(UTC)
         immediate = code in {"RATE_LIMITED", "ACCESS_DENIED", "NOT_CONFIGURED"}
         if immediate or not retryable or state.consecutive_failures >= 2:
-            cooldown = 300.0 if code in {"ACCESS_DENIED", "NOT_CONFIGURED"} else 60.0
+            adapter = self._adapters[source_id]
+            if code == "ACCESS_DENIED":
+                cooldown = float(getattr(adapter, "access_denied_cooldown_seconds", 300.0))
+            elif code == "NOT_CONFIGURED":
+                cooldown = 300.0
+            else:
+                cooldown = 60.0
             state.open_until = monotonic() + cooldown
 
     @classmethod

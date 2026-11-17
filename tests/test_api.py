@@ -41,7 +41,7 @@ def test_api_exposes_agent_search_pool(tmp_path, monkeypatch) -> None:
         google = client.get("/v1/sources/google")
         assert google.status_code == 200
         assert {item["backend"] for item in google.json()["adapters"]} == {
-            "scrapling_chrome",
+                "patchright_chrome+scrapling_chrome+ego_browser+camoufox",
             "ego_browser",
         }
 

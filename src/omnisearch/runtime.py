@@ -3,7 +3,13 @@ from dataclasses import dataclass
 from omnisearch.config import Settings, get_settings
 from omnisearch.core.planning import SearchPlanner
 from omnisearch.core.research import ResearchCoordinator
-from omnisearch.fetchers import EgoBrowserFetcher, SafeHttpFetcher, ScraplingFetcher
+from omnisearch.fetchers import (
+    CamoufoxFetcher,
+    EgoBrowserFetcher,
+    PatchrightFetcher,
+    SafeHttpFetcher,
+    ScraplingFetcher,
+)
 from omnisearch.models import OpenAICompatibleModelGateway
 from omnisearch.observability import configure_observability
 from omnisearch.providers.api import (
@@ -13,25 +19,27 @@ from omnisearch.providers.api import (
     CoreAdapter,
     CrossrefAdapter,
     EuropePmcAdapter,
-    GdeltAdapter,
     GitHubSearchAdapter,
     GitLabAdapter,
     HackerNewsAdapter,
     HuggingFaceAdapter,
     InternetArchiveAdapter,
     OpenAlexAdapter,
-    RedditAdapter,
+    RssHubAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
     XSearchAdapter,
     YouTubeAdapter,
 )
 from omnisearch.providers.browser import (
+    BraveBrowserAdapter,
     DuckDuckGoBrowserAdapter,
     GoogleBrowserAdapter,
     GooglePatentsBrowserAdapter,
     GoogleScholarBrowserAdapter,
+    RedditBrowserAdapter,
     XBrowserAdapter,
+    YouTubeBrowserAdapter,
 )
 from omnisearch.providers.catalog import build_default_registry
 from omnisearch.providers.registry import SourceRegistry
@@ -95,13 +103,25 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     coordinator = ResearchCoordinator(repository)
     sources = build_default_registry()
     scrapling = ScraplingFetcher()
+    patchright = PatchrightFetcher(
+        channel=settings.patchright_channel,
+        headless=settings.browser_headless,
+    )
+    browser_fallbacks = [scrapling]
+    camoufox_python = settings.camoufox_python.expanduser().resolve()
+    if settings.camoufox_enabled and camoufox_python.is_file():
+        browser_fallbacks.append(
+            CamoufoxFetcher(camoufox_python, headless=settings.browser_headless)
+        )
+    browser_fallback_tuple = tuple(browser_fallbacks)
     safe_http = SafeHttpFetcher()
     ego = EgoBrowserFetcher(settings.ego_script_dir)
     acquisition = DocumentAcquisitionService(
         safe_http,
-        scrapling,
+        patchright,
         ego,
         settings.chrome_user_data_dir / "acquisition",
+        browser_fallback_fetchers=browser_fallback_tuple,
     )
     crawler = SiteCrawler(acquisition, documents)
     github_token = settings.github_token.get_secret_value() if settings.github_token else None
@@ -120,12 +140,36 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     core_key = settings.core_api_key.get_secret_value() if settings.core_api_key else None
     x_token = settings.x_bearer_token.get_secret_value() if settings.x_bearer_token else None
     youtube_key = settings.youtube_api_key.get_secret_value() if settings.youtube_api_key else None
+    browser_adapter_options = {
+        "chrome_fetcher": patchright,
+        "browser_fallback_fetchers": browser_fallback_tuple,
+        "ego_fetcher": ego,
+        "chrome_user_data_dir": str(settings.chrome_user_data_dir),
+    }
     x_browser = XBrowserAdapter(
-        chrome_fetcher=scrapling,
-        ego_fetcher=ego,
-        chrome_user_data_dir=str(settings.chrome_user_data_dir),
+        **browser_adapter_options,
     )
     x_adapter = XSearchAdapter(bearer_token=x_token, fallback=x_browser) if x_token else x_browser
+    brave_browser = BraveBrowserAdapter(
+        **browser_adapter_options,
+    )
+    brave_adapter = (
+        BraveSearchAdapter(api_key=brave_key, fallback=brave_browser)
+        if brave_key
+        else brave_browser
+    )
+    youtube_browser = YouTubeBrowserAdapter(
+        **browser_adapter_options,
+    )
+    youtube_adapter = (
+        YouTubeAdapter(api_key=youtube_key, fallback=youtube_browser)
+        if youtube_key
+        else youtube_browser
+    )
+    reddit_browser = RedditBrowserAdapter(
+        **browser_adapter_options,
+    )
+    rsshub_routes = [route.strip() for route in settings.rsshub_routes.split(",") if route.strip()]
     search = MultiSourceSearchService(
         [
             GitHubSearchAdapter(token=github_token),
@@ -135,36 +179,28 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
             SemanticScholarAdapter(api_key=semantic_scholar_key),
             StackExchangeAdapter(),
             GitLabAdapter(token=gitlab_token),
-            RedditAdapter(),
+            reddit_browser,
             CoreAdapter(api_key=core_key),
             x_adapter,
             BlueskyAdapter(),
             HackerNewsAdapter(),
             HuggingFaceAdapter(),
             EuropePmcAdapter(),
-            GdeltAdapter(),
+            RssHubAdapter(base_url=settings.rsshub_base_url, routes=rsshub_routes),
             InternetArchiveAdapter(),
-            YouTubeAdapter(api_key=youtube_key),
-            BraveSearchAdapter(api_key=brave_key),
+            youtube_adapter,
+            brave_adapter,
             GoogleBrowserAdapter(
-                chrome_fetcher=scrapling,
-                ego_fetcher=ego,
-                chrome_user_data_dir=str(settings.chrome_user_data_dir),
+                **browser_adapter_options,
             ),
             DuckDuckGoBrowserAdapter(
-                chrome_fetcher=scrapling,
-                ego_fetcher=ego,
-                chrome_user_data_dir=str(settings.chrome_user_data_dir),
+                **browser_adapter_options,
             ),
             GoogleScholarBrowserAdapter(
-                chrome_fetcher=scrapling,
-                ego_fetcher=ego,
-                chrome_user_data_dir=str(settings.chrome_user_data_dir),
+                **browser_adapter_options,
             ),
             GooglePatentsBrowserAdapter(
-                chrome_fetcher=scrapling,
-                ego_fetcher=ego,
-                chrome_user_data_dir=str(settings.chrome_user_data_dir),
+                **browser_adapter_options,
             ),
         ],
         api_timeout_seconds=settings.search_api_timeout_seconds,

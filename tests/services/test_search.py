@@ -151,3 +151,19 @@ async def test_slow_source_is_bounded_by_channel_timeout() -> None:
 
     assert response.results == []
     assert response.failures[0].code == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_recent_circuit_failure() -> None:
+    adapter = FakeAdapter(
+        "arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)
+    )
+    service = MultiSourceSearchService([adapter])
+
+    await service.search(QuickSearchCommand(query="paper", sources=["arxiv"]))
+    health = (await service.health())[0]
+
+    assert health.healthy is False
+    assert health.status == "circuit_open"
+    assert health.last_failure_code == "RATE_LIMITED"
+    assert health.consecutive_failures == 1

@@ -18,6 +18,7 @@ from omnisearch.providers.api.more import (
     SemanticScholarAdapter,
     StackExchangeAdapter,
 )
+from omnisearch.providers.api.rsshub import RssHubAdapter
 
 __all__ = [
     "ArxivAdapter",
@@ -34,6 +35,7 @@ __all__ = [
     "InternetArchiveAdapter",
     "OpenAlexAdapter",
     "RedditAdapter",
+    "RssHubAdapter",
     "SemanticScholarAdapter",
     "StackExchangeAdapter",
     "XSearchAdapter",

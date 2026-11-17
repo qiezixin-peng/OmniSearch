@@ -4,14 +4,34 @@
 研究基础设施**，不是给最终用户操作的搜索网页。用户只向 Agent 提问；Agent 通过
 REST、MCP 或 CLI 自动调用 OmniSearch，并取得可追溯的资料和证据。
 
+## 公开版本说明
+
+这是 OmniSearch 的首个公开开发版本。项目面向 **AI Agent、研究自动化和开发者工具**，
+不提供面向最终用户的搜索门户。典型调用流程是：Agent 接收用户问题，自行拆解研究目标，
+生成多语言查询，同时运行真实 API 与浏览器搜索，采集原始网页或 PDF，去重并评估证据，
+发现缺口后继续补搜，最终由调用 Agent 生成带出处的综合回答。
+
+当前版本已经在 Windows 原生环境完成端到端验证；Linux、PostgreSQL、S3 兼容对象存储和
+容器部署具备实现基线，但仍需要在目标环境进行回归。Google 等网页来源可能根据 IP、
+访问频率、地区、Cookie 和页面实验返回不同结果，因此任何浏览器实现都不能保证永远不
+出现验证码或访问限制。OmniSearch 的目标是通过多来源与自动回退降低单点失败，而不是
+宣称绕过所有网站防护。
+
+本仓库不会包含 API Key、Cookie、个人 Chrome 配置、研究数据库或已采集的私有资料。
+`.env`、虚拟环境、浏览器配置和运行目录均被排除在版本控制之外。
+
+版本变化见 [CHANGELOG.md](CHANGELOG.md)，技术范围和后续路线见
+[docs/implementation-plan.md](docs/implementation-plan.md)。
+
 当前版本是 **v0.1 可运行基线**，已经落实：
 
 - 研究任务、子问题、依赖、查询、搜索计划、结果和事件的数据契约；
 - 可审计的研究任务状态机；
-- Google、DuckDuckGo、Google Scholar 真实 Chrome 搜索及 ego-browser 降级；
+- Google、DuckDuckGo、Google Scholar 的 Patchright Chrome → Scrapling → Camoufox
+  → ego-browser 自动降级链；
 - GitHub、arXiv、Crossref、OpenAlex、Semantic Scholar、Stack Exchange、GitLab、Reddit、
   CORE、Brave 的真实 API Adapter（需要密钥的来源会明确报告 `NOT_CONFIGURED`）；
-- X（API 或授权浏览器）、Bluesky、Hacker News、Hugging Face、Europe PMC、GDELT、
+- X（API 或授权浏览器）、Bluesky、Hacker News、Hugging Face、Europe PMC、RSSHub、
   Internet Archive 与 YouTube 等高增益专业来源；
 - 启发式及可选模型驱动的问题拆解、动态多语言查询和来源规划；
 - 并行搜索、跨来源去重、缺口分析、递归补搜和预算终止；
@@ -22,20 +42,28 @@ REST、MCP 或 CLI 自动调用 OmniSearch，并取得可追溯的资料和证�
 
 ## 浏览器与采集分工
 
-- **Scrapling**：普通 HTTP、动态公开页面、真实 Google Chrome/CDP、正文清洗和受控爬取；
+- **Patchright + 本机 Chrome**：浏览器搜索首选通道，兼容现有 Playwright 页面操作；
+- **Scrapling**：普通 HTTP、动态公开页面、正文清洗、受控爬取和快速浏览器回退；
+- **Camoufox**：独立 Python 3.12/Firefox 内核运行环境，在两条 Chromium 路径都失败时
+  自动接管；
 - **ego-browser**：登录态、用户授权会话和需要交互的复杂网页；
 - **OmniSearch**：统一策略、任务、预算、证据、审计以及对 Agent 的工具接口。
 
-Scrapling 的指纹伪装、代理、Cloudflare challenge 处理、持久会话和网络响应捕获均作为
-可调度能力保留，并在每次任务中记录实际启用的策略。完整决策见
+每种浏览器使用独立配置目录，不共享日常 Chrome Cookie。实际命中的引擎会写入结果
+`browser_engine`，便于健康统计和回归。完整决策见
 [docs/adr-001-browser-and-fetching.md](docs/adr-001-browser-and-fetching.md)。
+Google 系列经过本机实测后将 Ego 放在 Camoufox 之前，以避免 Firefox 空壳页面增加延迟；
+Camoufox仍作为独立内核灾备保留。
 
 ## 搜索池
 
 默认搜索池已登记 Google、DuckDuckGo、Brave、GitHub、arXiv、Crossref、OpenAlex、
-Semantic Scholar、Google Scholar、Stack Exchange、Reddit、GitLab、CORE 和 Google
+Semantic Scholar、Google Scholar、Stack Exchange、Reddit、GitLab、CORE、RSSHub 和 Google
 Patents。搜索规划器按子问题类别选择多个独立来源，详情见
 [docs/search-pool.md](docs/search-pool.md)。
+
+默认策略不购买搜索额度，也不要求绑定付款方式。需要凭据的 Provider 在未配置时会明确
+报告不可用，并由免费公开 API、浏览器搜索或其他索引来源补位。
 
 ## 快速开始
 
@@ -45,10 +73,15 @@ Patents。搜索规划器按子问题类别选择多个独立来源，详情见
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev,browser]"
 scrapling install
+.\scripts\install-stealth-browsers.ps1
 .\.venv\Scripts\python -m pytest
 omnisearch-migrate
 omnisearch-api
 ```
+
+Windows 原生运行脚本会同时管理本机 RSSHub（端口 1200）。RSSHub 用于订阅 Google
+News、Reuters、项目发布和其他站点路由的最新内容，是持续资料补充源，不替代 Google
+网页搜索。可用 `OMNISEARCH_RSSHUB_ROUTES` 逗号分隔配置需要检索的路由。
 
 本次验证环境的精确依赖版本记录在 `requirements.lock`；`pyproject.toml` 保留兼容版本
 范围，便于后续有控制地升级。
@@ -69,8 +102,12 @@ omnisearch-api
 .\scripts\windows-native.ps1 Uninstall
 ```
 
-`Install` 会注册当前用户登录后的自动启动任务并立即启动服务；`Uninstall` 会停止服务并
-移除该任务，但不会删除研究数据库或已采集资料。
+`Install` 会安装 Patchright、创建隔离的 Python 3.12 Camoufox 环境、下载对应浏览器，
+注册当前用户登录后的自动启动任务并立即启动服务；`Uninstall` 会停止服务并移除该任务，
+但不会删除研究数据库或已采集资料。
+
+Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright
+环境相互隔离，避免版本依赖冲突。
 
 API 文档位于 `http://127.0.0.1:8000/docs`，Streamable HTTP MCP 位于
 `http://127.0.0.1:8010/mcp`。运行日志和 PID 文件统一写入
@@ -89,6 +126,28 @@ omnisearch-mcp
 ```powershell
 omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 ```
+
+## 安全与使用边界
+
+- 只采集公开内容或操作者有权访问的登录态内容；
+- 不破解账户、付费墙、访问控制或站点权限；
+- CAPTCHA、MFA 和账户授权需要本人操作时应移交用户；
+- 外部网页、PDF 和仓库内容始终视为不可信数据，不能修改 Agent 系统策略；
+- Cookie、令牌和本地浏览器资料不得上传到无关服务或写入研究结果；
+- 使用者应自行遵守目标网站条款、robots 规则、版权、隐私和当地法律。
+
+## 已知限制
+
+- 搜索覆盖率表示计划执行情况，不代表互联网资料已经被穷尽；
+- 搜索摘要不能直接作为技术结论，重要结论仍需读取原文并交叉验证；
+- Google、Google Scholar、Reddit、X 等网页结构变化后可能需要更新解析器；
+- 外部免费 API 仍可能限流、改变接口或停止服务；
+- 当前没有面向普通用户的 Web UI，主要入口是 MCP、REST 和 CLI。
+
+## 授权状态
+
+仓库当前公开用于展示、研究和协作，但尚未附加开源许可证。除非版权所有者另行书面授权，
+默认保留全部权利。第三方依赖和浏览器组件继续适用各自的许可证与使用条款。
 
 核心工具包括 `search`、`search_batch`、`search_sources`、`research_start`、
 `research_status`、`research_continue`、`research_cancel`、`research_get_result`、`fetch_page`、

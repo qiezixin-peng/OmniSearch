@@ -351,6 +351,13 @@ class EuropePmcAdapter(HttpProvider, ProviderAdapter):
 
 class GdeltAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.gdeltproject.org/api/v2/doc/doc"
+    min_interval_seconds = 5.0
+
+    def __init__(self, *, client=None) -> None:
+        # GDELT can stall while overloaded. Keep both attempts inside the
+        # search service's 20 second API budget instead of letting one request
+        # consume the entire provider slot.
+        super().__init__(client=client, timeout_seconds=8.0, max_attempts=2)
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -457,9 +464,12 @@ class InternetArchiveAdapter(HttpProvider, ProviderAdapter):
 class YouTubeAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://www.googleapis.com/youtube/v3/search"
 
-    def __init__(self, *, api_key: str | None = None, client=None) -> None:
+    def __init__(
+        self, *, api_key: str | None = None, fallback: ProviderAdapter | None = None, client=None
+    ) -> None:
         super().__init__(client=client)
         self.api_key = api_key
+        self.fallback = fallback
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -494,7 +504,21 @@ class YouTubeAdapter(HttpProvider, ProviderAdapter):
             params["publishedAfter"] = request.date_from.isoformat()
         if request.date_to:
             params["publishedBefore"] = request.date_to.isoformat()
-        payload = await self._get_json(self.endpoint, params=params)
+        try:
+            payload = await self._get_json(self.endpoint, params=params)
+        except ProviderError as error:
+            if self.fallback is None or error.code not in {
+                "PAYMENT_REQUIRED",
+                "ACCESS_DENIED",
+                "RATE_LIMITED",
+                "TIMEOUT",
+                "UPSTREAM_ERROR",
+            }:
+                raise
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = error.code
+                yield result
+            return
         for item in payload.get("items", []):
             video_id = (item.get("id") or {}).get("videoId")
             snippet = item.get("snippet") or {}

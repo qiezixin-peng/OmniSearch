@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -17,6 +18,9 @@ class BrowserSearchAdapter(ProviderAdapter):
     category = SourceCategory.WEB
     result_type = "web_page"
     search_capabilities = {"web"}
+    attempt_timeout_ms = 12_000
+    wait_after_load_ms = 1_200
+    prefer_ego_before_camoufox = False
 
     def __init__(
         self,
@@ -24,8 +28,10 @@ class BrowserSearchAdapter(ProviderAdapter):
         chrome_fetcher: ContentFetcher,
         ego_fetcher: ContentFetcher,
         chrome_user_data_dir: str,
+        browser_fallback_fetchers: tuple[ContentFetcher, ...] = (),
     ) -> None:
         self.chrome_fetcher = chrome_fetcher
+        self.browser_fetchers = (chrome_fetcher, *browser_fallback_fetchers)
         self.ego_fetcher = ego_fetcher
         self.chrome_user_data_dir = str(Path(chrome_user_data_dir) / self.source_id)
 
@@ -42,35 +48,58 @@ class BrowserSearchAdapter(ProviderAdapter):
             supports_date_filter=False,
             supports_domain_filter=True,
             max_concurrency=1,
-            backend="scrapling_chrome+ego_browser",
+            backend="+".join(
+                "ego_browser"
+                if mode is FetchMode.EGO_BROWSER
+                else getattr(fetcher, "backend_name", type(fetcher).__name__)
+                for fetcher, mode in self._fetcher_sequence()
+            ),
         )
 
     async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
         failures: list[str] = []
+        access_denied = False
         document = None
         parsed_items: list[dict[str, str]] = []
         for url, fetcher, mode in self._attempts(request):
             try:
-                document = await fetcher.fetch(
-                    FetchRequest(
-                        url=url,
-                        mode=mode,
-                        timeout_ms=20_000,
-                        chrome_user_data_dir=(
-                            self.chrome_user_data_dir if mode is FetchMode.CHROME_MANAGED else None
-                        ),
-                        ego_task_name=f"OmniSearch {self.source_id} search",
-                        solve_cloudflare=True,
-                        network_idle=True,
-                        main_content_only=False,
-                    )
+                fetch_timeout_ms = (
+                    30_000
+                    if getattr(fetcher, "backend_name", "") == "camoufox"
+                    else self.attempt_timeout_ms
                 )
+                async with asyncio.timeout((fetch_timeout_ms + 3_000) / 1_000):
+                    document = await fetcher.fetch(
+                        FetchRequest(
+                            url=url,
+                            mode=mode,
+                            timeout_ms=fetch_timeout_ms,
+                            chrome_user_data_dir=(
+                                self.chrome_user_data_dir
+                                if mode is FetchMode.CHROME_MANAGED
+                                else None
+                            ),
+                            ego_task_name=f"OmniSearch {self.source_id} search",
+                            solve_cloudflare=True,
+                            network_idle=False,
+                            wait_after_load_ms=self.wait_after_load_ms,
+                            main_content_only=False,
+                        )
+                    )
                 if document.raw_html:
+                    if self._is_access_denied(document):
+                        access_denied = True
+                        failures.append(f"{mode.value} {url}: access challenge or rate limit")
+                        continue
                     candidates = self._parse(document.raw_html)
+                    prepared_candidates = await asyncio.gather(
+                        *(
+                            self._prepare_with_timeout(item)
+                            for item in candidates[: max(request.max_results * 2, 10)]
+                        )
+                    )
                     parsed_items = [
-                        prepared
-                        for item in candidates
-                        if (prepared := await self._prepare_item(item)) is not None
+                        prepared for prepared in prepared_candidates if prepared is not None
                     ]
                 if parsed_items:
                     break
@@ -81,7 +110,7 @@ class BrowserSearchAdapter(ProviderAdapter):
                 break
         if document is None or not parsed_items:
             raise ProviderError(
-                "BROWSER_SEARCH_FAILED",
+                "ACCESS_DENIED" if access_denied else "BROWSER_SEARCH_FAILED",
                 "; ".join(failures) or f"{self.source_id} returned no HTML",
                 retryable=True,
             )
@@ -119,10 +148,25 @@ class BrowserSearchAdapter(ProviderAdapter):
         return [
             (url, fetcher, mode)
             for url in self._search_urls(request)
-            for fetcher, mode in (
-                (self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-                (self.ego_fetcher, FetchMode.EGO_BROWSER),
-            )
+            for fetcher, mode in self._fetcher_sequence()
+        ]
+
+    def _fetcher_sequence(self) -> list[tuple[ContentFetcher, FetchMode]]:
+        if self.prefer_ego_before_camoufox:
+            fast = [
+                (fetcher, FetchMode.CHROME_MANAGED)
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") != "camoufox"
+            ]
+            camoufox = [
+                (fetcher, FetchMode.CHROME_MANAGED)
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") == "camoufox"
+            ]
+            return [*fast, (self.ego_fetcher, FetchMode.EGO_BROWSER), *camoufox]
+        return [
+            *((fetcher, FetchMode.CHROME_MANAGED) for fetcher in self.browser_fetchers),
+            (self.ego_fetcher, FetchMode.EGO_BROWSER),
         ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
@@ -131,10 +175,39 @@ class BrowserSearchAdapter(ProviderAdapter):
     async def _prepare_item(self, item: dict[str, str]) -> dict[str, str] | None:
         return item
 
+    async def _prepare_with_timeout(self, item: dict[str, str]) -> dict[str, str] | None:
+        try:
+            async with asyncio.timeout(6):
+                return await self._prepare_item(item)
+        except (TimeoutError, httpx.HTTPError):
+            return None
+
+    @staticmethod
+    def _is_access_denied(document) -> bool:
+        if document.status_code in {403, 429}:
+            return True
+        final_url = str(document.final_url).casefold()
+        if "google.com/sorry/" in final_url or "sorry/index" in final_url:
+            return True
+        source = (document.raw_html or "").casefold()
+        markers = (
+            "our systems have detected unusual traffic",
+            "unusual traffic from your computer network",
+            "verify you are human",
+            "captcha-delivery.com",
+            "g-recaptcha",
+            "recaptcha/api",
+            "cf-chl-",
+        )
+        return any(marker in source for marker in markers)
+
 
 class GoogleBrowserAdapter(BrowserSearchAdapter):
     source_id = "google"
     adapter_id = "google_chrome"
+    min_interval_seconds = 2.0
+    access_denied_cooldown_seconds = 900.0
+    prefer_ego_before_camoufox = True
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -212,6 +285,148 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
         return records
 
 
+class BraveBrowserAdapter(BrowserSearchAdapter):
+    source_id = "brave"
+    adapter_id = "brave_browser"
+
+    def _search_url(self, request: SearchRequest) -> str:
+        query = request.query + (f" site:{request.domain}" if request.domain else "")
+        language = (request.language or "en").split("-", 1)[0]
+        return f"https://search.brave.com/search?q={quote_plus(query)}&source=web&lang={language}"
+
+    def _parse(self, source: str) -> list[dict[str, str]]:
+        tree = html.fromstring(source)
+        records: list[dict[str, str]] = []
+        selectors = (
+            '[data-type="web"] a[href]',
+            '.snippet a[href]',
+            '.result a[href]',
+            'a[data-testid="result-title-a"]',
+        )
+        anchors = []
+        for selector in selectors:
+            anchors.extend(tree.cssselect(selector))
+        for anchor in anchors:
+            href = anchor.get("href", "")
+            parsed = urlparse(href)
+            if parsed.scheme not in {"http", "https"} or parsed.netloc.endswith("brave.com"):
+                continue
+            title_nodes = anchor.cssselect("h2, h3, .title")
+            title = " ".join(
+                (title_nodes[0] if title_nodes else anchor).itertext()
+            ).strip()
+            if not title:
+                continue
+            container = anchor
+            for _ in range(4):
+                if container is None:
+                    break
+                if "snippet" in (container.get("class") or ""):
+                    break
+                container = container.getparent()
+            snippet = ""
+            if container is not None:
+                nodes = container.cssselect('.description, [class*="snippet-description"]')
+                if nodes:
+                    snippet = " ".join(nodes[0].itertext()).strip()
+            records.append({"title": title, "url": href, "snippet": snippet})
+        return records
+
+
+class RedditBrowserAdapter(BrowserSearchAdapter):
+    source_id = "reddit"
+    adapter_id = "reddit_browser"
+    category = SourceCategory.COMMUNITY
+    result_type = "post"
+    search_capabilities = {"post", "comment", "community"}
+
+    def _search_urls(self, request: SearchRequest) -> list[str]:
+        query = quote_plus(request.query)
+        indexed = quote_plus(request.query + " site:reddit.com/comments")
+        return [
+            f"https://www.reddit.com/search/?q={query}&sort=relevance",
+            f"https://duckduckgo.com/?q={indexed}&ia=web",
+        ]
+
+    def _search_url(self, request: SearchRequest) -> str:
+        return self._search_urls(request)[0]
+
+    def _parse(self, source: str) -> list[dict[str, str]]:
+        tree = html.fromstring(source)
+        records: list[dict[str, str]] = []
+        for anchor in tree.cssselect('a[href*="/comments/"], a.result__a'):
+            href = anchor.get("href", "")
+            if "uddg=" in href:
+                href = parse_qs(urlparse(href).query).get("uddg", [href])[0]
+            if href.startswith("/"):
+                href = "https://www.reddit.com" + href
+            parsed = urlparse(href)
+            if "reddit.com" not in parsed.netloc or "/comments/" not in parsed.path:
+                continue
+            title = " ".join(anchor.itertext()).strip()
+            if not title:
+                continue
+            records.append({"title": title, "url": href, "snippet": ""})
+        return records
+
+
+class YouTubeBrowserAdapter(BrowserSearchAdapter):
+    source_id = "youtube"
+    adapter_id = "youtube_browser"
+    result_type = "video"
+    search_capabilities = {"video", "channel", "first_party_statement"}
+    wait_after_load_ms = 1_800
+
+    def _search_url(self, request: SearchRequest) -> str:
+        return f"https://www.youtube.com/results?search_query={quote_plus(request.query)}"
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        direct_url = self._search_url(request)
+        google_url = (
+            "https://www.google.com/search?q="
+            f"{quote_plus(request.query + ' site:youtube.com/watch')}&num=20"
+        )
+        duckduckgo_url = (
+            "https://duckduckgo.com/?q="
+            f"{quote_plus(request.query + ' site:youtube.com/watch')}&ia=web"
+        )
+        return [
+            (url, fetcher, FetchMode.CHROME_MANAGED)
+            for url in (direct_url, google_url, duckduckgo_url)
+            for fetcher in self.browser_fetchers
+        ]
+
+    def _parse(self, source: str) -> list[dict[str, str]]:
+        tree = html.fromstring(source)
+        records: list[dict[str, str]] = []
+        anchors = tree.cssselect('a#video-title[href*="watch?v="], a[href*="/watch?v="]')
+        anchors.extend(tree.xpath("//a[.//h3]"))
+        for anchor in anchors:
+            href = anchor.get("href", "")
+            if href.startswith("/url?"):
+                href = parse_qs(urlparse(href).query).get("q", [""])[0]
+            if "uddg=" in href:
+                href = parse_qs(urlparse(href).query).get("uddg", [href])[0]
+            if href.startswith("/"):
+                href = "https://www.youtube.com" + href
+            parsed = urlparse(href)
+            if "youtube.com" not in parsed.netloc or "/watch" not in parsed.path:
+                continue
+            title = (anchor.get("title") or " ".join(anchor.itertext())).strip()
+            if title and "watch?v=" in href:
+                video_id = parse_qs(parsed.query).get("v", [""])[0]
+                records.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "snippet": "",
+                        "external_id_name": "youtube_video_id",
+                        "external_id": video_id,
+                    }
+                )
+        return records
+
+
 class XBrowserAdapter(BrowserSearchAdapter):
     source_id = "x"
     adapter_id = "x_browser"
@@ -223,22 +438,23 @@ class XBrowserAdapter(BrowserSearchAdapter):
         return f"https://x.com/search?q={quote_plus(request.query)}&src=typed_query&f=live"
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
-        language = (request.language or "en").split("-", 1)[0]
         return [
             self._search_url(request),
-            (
-                "https://www.google.com/search?q="
-                f"{quote_plus(request.query + ' site:x.com/*/status')}&hl={language}&num=20"
-            ),
+            "https://duckduckgo.com/?q="
+            f"{quote_plus(request.query + ' site:x.com')}&ia=web",
+            "https://www.google.com/search?q="
+            f"{quote_plus(request.query + ' site:x.com/status')}&num=20",
         ]
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
-        direct_url, indexed_url = self._search_urls(request)
+        direct_url, indexed_url, google_url = self._search_urls(request)
         return [
+            *((url, fetcher, FetchMode.CHROME_MANAGED)
+              for url in (indexed_url, google_url)
+              for fetcher in self.browser_fetchers),
             (direct_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
-            (direct_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-            (indexed_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
             (indexed_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+            (google_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
         ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
@@ -270,6 +486,8 @@ class XBrowserAdapter(BrowserSearchAdapter):
             href = anchor.get("href", "")
             if href.startswith("/url?"):
                 href = parse_qs(urlparse(href).query).get("q", [""])[0]
+            if "uddg=" in href:
+                href = parse_qs(urlparse(href).query).get("uddg", [href])[0]
             parsed = urlparse(href)
             if parsed.netloc.removeprefix("www.") not in {"x.com", "twitter.com"}:
                 continue
@@ -294,6 +512,9 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     category = SourceCategory.ACADEMIC
     result_type = "paper"
     search_capabilities = {"paper", "author", "citation"}
+    min_interval_seconds = 30.0
+    access_denied_cooldown_seconds = 21_600.0
+    prefer_ego_before_camoufox = True
 
     def _search_url(self, request: SearchRequest) -> str:
         language = (request.language or "en").split("-", 1)[0]
@@ -324,6 +545,7 @@ class GooglePatentsBrowserAdapter(BrowserSearchAdapter):
     category = SourceCategory.PATENT
     result_type = "patent"
     search_capabilities = {"patent", "inventor", "assignee", "citation"}
+    prefer_ego_before_camoufox = True
 
     def _search_url(self, request: SearchRequest) -> str:
         return (

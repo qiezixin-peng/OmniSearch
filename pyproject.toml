@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 browser = [
   "PySocks>=1.7,<2",
+  "patchright>=1.64.4,<1.65",
   "scrapling[rag]>=0.5.1,<0.6",
 ]
 dev = [

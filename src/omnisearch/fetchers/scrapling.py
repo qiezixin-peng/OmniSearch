@@ -13,6 +13,8 @@ class ScraplingUnavailable(RuntimeError):
 class ScraplingFetcher(ContentFetcher):
     """Scrapling adapter with explicit browser isolation and secret resolution."""
 
+    backend_name = "scrapling_chrome"
+
     def __init__(
         self,
         *,

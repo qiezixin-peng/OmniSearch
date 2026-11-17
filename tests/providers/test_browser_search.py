@@ -4,12 +4,16 @@ import pytest
 
 from omnisearch.domain.models import SearchRequest
 from omnisearch.fetchers import ContentFetcher, FetchedDocument
+from omnisearch.providers.base import ProviderError
 from omnisearch.providers.browser import (
+    BraveBrowserAdapter,
     DuckDuckGoBrowserAdapter,
     GoogleBrowserAdapter,
     GooglePatentsBrowserAdapter,
     GoogleScholarBrowserAdapter,
+    RedditBrowserAdapter,
     XBrowserAdapter,
+    YouTubeBrowserAdapter,
 )
 
 
@@ -80,6 +84,43 @@ async def test_browser_search_falls_back_to_ego() -> None:
     results = [item async for item in adapter.search(search_request())]
     assert results[0].raw_payload["browser_engine"] == "fake"
     assert results[0].channel.value == "browser"
+
+
+@pytest.mark.asyncio
+async def test_browser_search_uses_camoufox_before_ego() -> None:
+    calls: list[str] = []
+
+    class BrokenFetcher(ContentFetcher):
+        async def fetch(self, request):
+            calls.append("patchright")
+            raise RuntimeError("Chrome unavailable")
+
+    class CamoufoxFake(FakeFetcher):
+        backend_name = "camoufox"
+
+        async def fetch(self, request):
+            calls.append("camoufox")
+            document = await super().fetch(request)
+            document.metadata["engine"] = self.backend_name
+            return document
+
+    class ForbiddenEgo(ContentFetcher):
+        async def fetch(self, request):
+            raise AssertionError("ego should not be reached")
+
+    fallback = CamoufoxFake(
+        '<a href="https://example.org" class="result__a">Fallback result</a>'
+    )
+    adapter = DuckDuckGoBrowserAdapter(
+        chrome_fetcher=BrokenFetcher(),
+        browser_fallback_fetchers=(fallback,),
+        ego_fetcher=ForbiddenEgo(),
+        chrome_user_data_dir="C:/dedicated",
+    )
+    results = [item async for item in adapter.search(search_request())]
+
+    assert calls == ["patchright", "camoufox"]
+    assert results[0].raw_payload["browser_engine"] == "camoufox"
 
 
 @pytest.mark.asyncio
@@ -161,7 +202,7 @@ async def test_x_browser_parser_accepts_indexed_post_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
+async def test_x_prefers_stable_indexed_search_before_authenticated_session() -> None:
     calls: list[tuple[str, str]] = []
 
     class EmptyFetcher(FakeFetcher):
@@ -175,7 +216,7 @@ async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
             calls.append((request.mode.value, url))
             source = (
                 '<a href="https://x.com/researcher/status/789"><h3>Indexed post</h3></a>'
-                if "google.com/search" in url
+                if "duckduckgo.com/" in url
                 else "<html><body>No posts</body></html>"
             )
             return FetchedDocument(
@@ -198,11 +239,128 @@ async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
 
     results = [item async for item in adapter.search(search_request())]
 
-    assert len(calls) == 3
-    assert calls[0][0] == "ego_browser"
-    assert calls[0][1].startswith("https://x.com/search")
-    assert calls[1][0] == "chrome_managed"
-    assert calls[1][1].startswith("https://x.com/search")
-    assert calls[2][0] == "chrome_managed"
-    assert calls[2][1].startswith("https://www.google.com/search")
+    assert len(calls) == 1
+    assert calls[0][0] == "chrome_managed"
+    assert calls[0][1].startswith("https://duckduckgo.com/")
     assert results[0].external_identifiers == {"x_post_id": "789"}
+
+
+@pytest.mark.asyncio
+async def test_brave_browser_parser_extracts_external_results() -> None:
+    source = """<div class="snippet" data-type="web">
+    <a href="https://example.org/research"><div class="title">Primary research</div></a>
+    <div class="description">Technical details</div></div>"""
+    fetcher = FakeFetcher(source)
+    adapter = BraveBrowserAdapter(
+        chrome_fetcher=fetcher, ego_fetcher=fetcher, chrome_user_data_dir="C:/dedicated"
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert str(results[0].url) == "https://example.org/research"
+    assert results[0].snippet == "Technical details"
+
+
+@pytest.mark.asyncio
+async def test_reddit_browser_parser_accepts_indexed_redirect() -> None:
+    source = """<a class="result__a"
+    href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.reddit.com%2Fr%2Ftest%2Fcomments%2Fabc%2Ftopic%2F">
+    Useful discussion</a>"""
+    fetcher = FakeFetcher(source)
+    adapter = RedditBrowserAdapter(
+        chrome_fetcher=fetcher, ego_fetcher=fetcher, chrome_user_data_dir="C:/dedicated"
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].source_id == "reddit"
+    assert "/comments/abc/" in str(results[0].url)
+
+
+@pytest.mark.asyncio
+async def test_youtube_browser_parser_extracts_video_id() -> None:
+    source = """<a id="video-title" href="/watch?v=abc123" title="Technical talk">
+    Technical talk</a>"""
+    fetcher = FakeFetcher(source)
+    adapter = YouTubeBrowserAdapter(
+        chrome_fetcher=fetcher, ego_fetcher=fetcher, chrome_user_data_dir="C:/dedicated"
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].external_identifiers == {"youtube_video_id": "abc123"}
+
+
+@pytest.mark.asyncio
+async def test_youtube_uses_indexed_google_without_opening_direct_ego_session() -> None:
+    class IndexedFetcher(ContentFetcher):
+        async def fetch(self, request):
+            source = (
+                '<a href="https://www.youtube.com/watch?v=indexed" title="Indexed talk">x</a>'
+                if "google.com/search" in str(request.url)
+                else "<html><body>No videos</body></html>"
+            )
+            return FetchedDocument(
+                url=request.url,
+                final_url=request.url,
+                mode=request.mode,
+                status_code=200,
+                markdown="",
+                raw_html=source,
+                metadata={"engine": "fake"},
+            )
+
+    class ForbiddenEgo(ContentFetcher):
+        async def fetch(self, request):
+            raise AssertionError("direct YouTube Ego session should not be needed")
+
+    adapter = YouTubeBrowserAdapter(
+        chrome_fetcher=IndexedFetcher(),
+        ego_fetcher=ForbiddenEgo(),
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].external_identifiers == {"youtube_video_id": "indexed"}
+
+
+@pytest.mark.asyncio
+async def test_youtube_accepts_duckduckgo_index_redirects() -> None:
+    source = """<a href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabc789">
+    <h3>Indexed video</h3></a>"""
+    fetcher = FakeFetcher(source)
+    adapter = YouTubeBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].external_identifiers == {"youtube_video_id": "abc789"}
+
+
+@pytest.mark.asyncio
+async def test_browser_challenge_is_reported_as_access_denied() -> None:
+    class ChallengeFetcher(ContentFetcher):
+        async def fetch(self, request):
+            return FetchedDocument(
+                url=request.url,
+                final_url=request.url,
+                mode=request.mode,
+                status_code=429,
+                markdown="",
+                raw_html="<html>Our systems have detected unusual traffic</html>",
+                metadata={"engine": "fake"},
+            )
+
+    fetcher = ChallengeFetcher()
+    adapter = GoogleScholarBrowserAdapter(
+        chrome_fetcher=fetcher, ego_fetcher=fetcher, chrome_user_data_dir="C:/dedicated"
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        _ = [item async for item in adapter.search(search_request())]
+
+    assert raised.value.code == "ACCESS_DENIED"

@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     core_api_key: SecretStr | None = None
     x_bearer_token: SecretStr | None = None
     youtube_api_key: SecretStr | None = None
+    rsshub_base_url: str = "http://127.0.0.1:1200"
+    rsshub_routes: str = (
+        "/google/news/Top%20stories/hl=en-US&gl=US&ceid=US:en,"
+        "/reuters/world,/hackernews/index"
+    )
     model_base_url: str | None = None
     model_name: str | None = None
     model_api_key: SecretStr | None = None
@@ -36,8 +41,12 @@ class Settings(BaseSettings):
     runtime_dir: Path = Path(".runtime")
     chrome_user_data_dir: Path = Path(".runtime/chrome-profile")
     ego_script_dir: Path = Path(".runtime/ego-scripts")
+    browser_headless: bool = True
+    patchright_channel: str = "chrome"
+    camoufox_enabled: bool = True
+    camoufox_python: Path = Path(".venv-camoufox312/Scripts/python.exe")
     search_api_timeout_seconds: float = Field(default=20.0, gt=0)
-    search_browser_timeout_seconds: float = Field(default=40.0, gt=0)
+    search_browser_timeout_seconds: float = Field(default=60.0, gt=0)
     search_cache_ttl_seconds: float = Field(default=900.0, ge=0)
     search_cache_max_entries: int = Field(default=2048, ge=1, le=100000)
     research_query_concurrency: int = Field(default=8, ge=1, le=64)

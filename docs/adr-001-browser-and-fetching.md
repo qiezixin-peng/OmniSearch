@@ -13,20 +13,28 @@ URL 的正文、元数据和版本。Scrapling 是采集框架，不应被描述
 
 ## 决策
 
-保留一个采集路由层，并提供三个相互隔离的执行路径。
+保留一个采集路由层，并提供相互隔离的执行路径。
 
 | 路径 | 用途 | 会话边界 |
 |---|---|---|
 | Scrapling HTTP | 普通 HTML、文档入口、批量公开页面 | 独立请求或任务会话 |
-| Scrapling Chrome | JavaScript 页面、专用 Chrome、授权 CDP | 专用配置目录或新建 CDP Context |
+| Patchright Chrome | 综合搜索与常规 JavaScript 页面 | OmniSearch 专用 Chrome 配置目录 |
+| Camoufox | Chrome 受阻后的跨内核回退 | 隔离 Python 3.12 与 Firefox 配置目录 |
+| Scrapling Chrome | 第三浏览器回退、授权 CDP | 专用配置目录或新建 CDP Context |
 | ego-browser | 登录态、用户授权上下文、复杂交互 | 独立 TaskSpace |
 
 ### Chrome 模式
 
-1. **Managed Chrome**：Scrapling 以 `real_chrome=True` 启动本机 Google Chrome，并使用
-   OmniSearch 专用用户数据目录；不得使用日常 Chrome 默认目录。
-2. **CDP Chrome**：用户明确启动调试实例后，通过 `AsyncRemoteSession` 连接，并默认
+1. **Patchright Chrome**：以 `channel="chrome"` 启动本机 Google Chrome，作为搜索首试；
+   不进行 JavaScript 指纹注入。
+2. **Scrapling Managed Chrome**：作为快速自动回退，保留 `real_chrome=True`、challenge
+   等采集能力。
+3. **Camoufox**：两条 Chromium 路径均返回 challenge、空结果或启动异常时，改用 C++
+   内核级指纹的 Firefox；因其 Playwright 版本约束，与主服务使用独立 Python 3.12 环境。
+4. **CDP Chrome**：用户明确启动调试实例后，通过 `AsyncRemoteSession` 连接，并默认
    `new_context=True`。不得把 Cookie 或个人配置同步到云端。
+
+所有自动浏览器都使用 OmniSearch 专用用户数据目录，不得使用日常 Chrome 默认目录。
 
 ### ego-browser 模式
 
@@ -65,10 +73,11 @@ OmniSearch 在核心服务内调用 Scrapling Python API，而不是把 Scraplin
 
 ```text
 公开静态页面       -> Scrapling HTTP
-公开动态页面       -> Scrapling Managed Chrome
+公开动态/搜索页面  -> Patchright Chrome -> Scrapling Chrome -> Camoufox
+Google 系列页面    -> Patchright Chrome -> Scrapling Chrome -> ego-browser -> Camoufox
 授权调试浏览器     -> Scrapling CDP Chrome
 登录态/个人上下文  -> ego-browser
-challenge 可自动处理 -> Scrapling Chrome
+challenge 可自动处理 -> Scrapling Chrome / Camoufox
 登录态/人工确认      -> ego-browser handoff
 ```
 

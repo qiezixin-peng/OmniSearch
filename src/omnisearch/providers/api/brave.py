@@ -12,10 +12,15 @@ class BraveSearchAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.search.brave.com/res/v1/web/search"
 
     def __init__(
-        self, *, api_key: str | None, client: httpx.AsyncClient | None = None
+        self,
+        *,
+        api_key: str | None,
+        fallback: ProviderAdapter | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(client=client)
         self.api_key = api_key
+        self.fallback = fallback
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -41,17 +46,31 @@ class BraveSearchAdapter(HttpProvider, ProviderAdapter):
         query = request.query
         if request.domain:
             query = f"{query} site:{request.domain}"
-        payload = await self._get_json(
-            self.endpoint,
-            params={
-                "q": query,
-                "count": min(request.max_results, 20),
-                "offset": offset,
-                "search_lang": request.language or "en",
-                "safesearch": "moderate",
-            },
-            headers={"X-Subscription-Token": self.api_key},
-        )
+        try:
+            payload = await self._get_json(
+                self.endpoint,
+                params={
+                    "q": query,
+                    "count": min(request.max_results, 20),
+                    "offset": offset,
+                    "search_lang": request.language or "en",
+                    "safesearch": "moderate",
+                },
+                headers={"X-Subscription-Token": self.api_key},
+            )
+        except ProviderError as error:
+            if self.fallback is None or error.code not in {
+                "PAYMENT_REQUIRED",
+                "ACCESS_DENIED",
+                "RATE_LIMITED",
+                "TIMEOUT",
+                "UPSTREAM_ERROR",
+            }:
+                raise
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = error.code
+                yield result
+            return
         for item in (payload.get("web") or {}).get("results", []):
             yield SearchResult(
                 source_id="brave",

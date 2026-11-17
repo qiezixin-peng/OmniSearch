@@ -1,4 +1,6 @@
 .venv/
+.venv-camoufox/
+.venv-camoufox312/
 __pycache__/
 *.py[cod]
 *.egg-info/

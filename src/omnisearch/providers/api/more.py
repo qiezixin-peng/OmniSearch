@@ -16,6 +16,7 @@ def _unix(value: int | None) -> datetime | None:
 
 class SemanticScholarAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.semanticscholar.org/graph/v1/paper/search"
+    min_interval_seconds = 1.1
 
     def __init__(self, *, api_key: str | None = None, client=None) -> None:
         super().__init__(client=client)
@@ -206,8 +207,11 @@ class GitLabAdapter(HttpProvider, ProviderAdapter):
 class RedditAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://www.reddit.com/search.json"
 
-    def __init__(self, *, client=None) -> None:
+    min_interval_seconds = 1.0
+
+    def __init__(self, *, fallback: ProviderAdapter | None = None, client=None) -> None:
         super().__init__(client=client, user_agent="OmniSearch/0.1 research engine")
+        self.fallback = fallback
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -224,17 +228,36 @@ class RedditAdapter(HttpProvider, ProviderAdapter):
         )
 
     async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
-        payload = await self._get_json(
-            self.endpoint,
-            params={
-                "q": request.query,
-                "limit": request.max_results,
-                "sort": "relevance",
-                "raw_json": 1,
-                **({"after": request.cursor} if request.cursor else {}),
-            },
-        )
-        for child in (payload.get("data") or {}).get("children", []):
+        try:
+            payload = await self._get_json(
+                self.endpoint,
+                params={
+                    "q": request.query,
+                    "limit": request.max_results,
+                    "sort": "relevance",
+                    "raw_json": 1,
+                    **({"after": request.cursor} if request.cursor else {}),
+                },
+            )
+        except ProviderError as error:
+            if self.fallback is None or error.code not in {
+                "ACCESS_DENIED",
+                "RATE_LIMITED",
+                "TIMEOUT",
+                "UPSTREAM_ERROR",
+            }:
+                raise
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = error.code
+                yield result
+            return
+        children = (payload.get("data") or {}).get("children", [])
+        if not children and self.fallback is not None:
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = "EMPTY_RESPONSE"
+                yield result
+            return
+        for child in children:
             item = child.get("data") or {}
             permalink = item.get("permalink")
             if not permalink:
