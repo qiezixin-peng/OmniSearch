@@ -253,6 +253,14 @@ def get_research_result(
     except ResearchNotFound as error:
         raise HTTPException(status_code=404, detail="research task not found") from error
     repository = service.repository
+    merged_event = next(
+        (
+            event
+            for event in reversed(service.events(research_id))
+            if event.event_type == "RESULTS_MERGED"
+        ),
+        None,
+    )
     acquired = documents.evidence_for_research(research_id)
     evaluator = EvidenceEvaluator()
     results = []
@@ -279,6 +287,14 @@ def get_research_result(
         "summary": repository.search_summary(research_id),
         "query_progress": repository.query_progress(research_id),
         "coverage_matrix": repository.coverage_matrix(research_id),
+        "quality": (
+            {
+                "gate_passed": merged_event.payload.get("quality_gate_passed"),
+                "issues": merged_event.payload.get("quality_issues", []),
+            }
+            if merged_event
+            else None
+        ),
         "results": results,
     }
 

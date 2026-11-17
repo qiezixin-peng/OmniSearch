@@ -80,6 +80,34 @@ class BlockingAdapter(AlwaysFindsAdapter):
             url=f"https://example.test/{request.query_id}",
         )
 
+
+class ChannelFindsAdapter(ProviderAdapter):
+    def __init__(self, source_id: str, channel: Channel, *, finds: bool = True) -> None:
+        self.source_id = source_id
+        self.channel = channel
+        self.finds = finds
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            source_id=self.source_id,
+            adapter_id=f"{self.source_id}_{self.channel.value}",
+            category=SourceCategory.WEB,
+            channel=self.channel,
+        )
+
+    async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+        if self.finds:
+            yield SearchResult(
+                source_id=self.source_id,
+                adapter_id=f"{self.source_id}_{self.channel.value}",
+                channel=self.channel,
+                result_type="web_page",
+                title=f"{self.source_id} evidence for {request.query}",
+                url="https://shared.example/independent-evidence",
+            )
+
+
 def make_registry() -> SourceRegistry:
     return SourceRegistry(
         [
@@ -93,6 +121,99 @@ def make_registry() -> SourceRegistry:
             )
         ]
     )
+
+
+def make_dual_channel_registry(
+    api: ChannelFindsAdapter, browser: ChannelFindsAdapter
+) -> SourceRegistry:
+    return SourceRegistry(
+        [
+            SourceDefinition(
+                source_id=adapter.source_id,
+                display_name=adapter.source_id,
+                category=SourceCategory.WEB,
+                role=SourceRole.DISCOVERY,
+                priority=0,
+                adapters=[adapter.capabilities],
+            )
+            for adapter in (api, browser)
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_strict_quality_gate_requires_real_dual_channel_evidence(tmp_path) -> None:
+    database = Database(f"sqlite:///{(tmp_path / 'quality-gate.db').as_posix()}")
+    database.create_schema()
+    repository = SqlResearchRepository(database)
+    coordinator = ResearchCoordinator(repository)
+    created = coordinator.create(
+        ResearchCreate(
+            question="audio watermark mechanism",
+            budget=ResearchBudget(
+                max_rounds=2,
+                max_queries=10,
+                max_languages=1,
+                max_pages_to_fetch=0,
+            ),
+        )
+    )
+    api = ChannelFindsAdapter("api_source", Channel.API)
+    browser = ChannelFindsAdapter("browser_source", Channel.BROWSER, finds=False)
+    search = MultiSourceSearchService([api, browser])
+    planner = SearchPlanner(
+        make_dual_channel_registry(api, browser),
+        available_sources=search.configured_sources,
+        source_channels=search.configured_source_channels,
+        require_dual_channel=True,
+    )
+    executor = ResearchExecutionService(coordinator, repository, planner, search)
+
+    report = await executor.run(created.id)
+
+    assert report.status is ResearchStatus.PARTIAL
+    assert report.quality_gate_passed is False
+    assert "missing_channel_evidence:browser" in report.quality_issues
+    assert any(
+        query.purpose == "required browser evidence recovery" for query in report.plan.queries
+    )
+
+
+@pytest.mark.asyncio
+async def test_strict_quality_gate_completes_with_two_sources_and_both_channels(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite:///{(tmp_path / 'quality-pass.db').as_posix()}")
+    database.create_schema()
+    repository = SqlResearchRepository(database)
+    coordinator = ResearchCoordinator(repository)
+    created = coordinator.create(
+        ResearchCreate(
+            question="audio watermark mechanism",
+            budget=ResearchBudget(
+                max_rounds=1,
+                max_queries=10,
+                max_languages=1,
+                max_pages_to_fetch=0,
+            ),
+        )
+    )
+    api = ChannelFindsAdapter("api_source", Channel.API)
+    browser = ChannelFindsAdapter("browser_source", Channel.BROWSER)
+    search = MultiSourceSearchService([api, browser])
+    planner = SearchPlanner(
+        make_dual_channel_registry(api, browser),
+        available_sources=search.configured_sources,
+        source_channels=search.configured_source_channels,
+        require_dual_channel=True,
+    )
+    executor = ResearchExecutionService(coordinator, repository, planner, search)
+
+    report = await executor.run(created.id)
+
+    assert report.status is ResearchStatus.COMPLETED
+    assert report.quality_gate_passed is True
+    assert report.quality_issues == []
 
 
 @pytest.mark.asyncio

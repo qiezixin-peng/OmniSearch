@@ -361,12 +361,28 @@ def research_get_result(research_id: str, limit: int = 100) -> dict[str, Any]:
     engine = runtime()
     identifier = UUID(research_id)
     task = engine.coordinator.get(identifier)
+    merged_event = next(
+        (
+            event
+            for event in reversed(engine.coordinator.events(identifier))
+            if event.event_type == "RESULTS_MERGED"
+        ),
+        None,
+    )
     return {
         "research_id": research_id,
         "status": task.status.value,
         "summary": engine.repository.search_summary(identifier),
         "query_progress": engine.repository.query_progress(identifier),
         "coverage_matrix": engine.repository.coverage_matrix(identifier),
+        "quality": (
+            {
+                "gate_passed": merged_event.payload.get("quality_gate_passed"),
+                "issues": merged_event.payload.get("quality_issues", []),
+            }
+            if merged_event
+            else None
+        ),
         "results": _research_records_with_evidence(engine, identifier, limit),
         "agent_next_action": (
             "Synthesize a direct answer for the user from these records; cite supporting sources, "

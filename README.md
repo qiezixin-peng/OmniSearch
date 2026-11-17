@@ -111,15 +111,22 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 
 ## 延迟优化策略
 
-深度研究保留 API 与浏览器双通道，但不会让所有扩展语言重复执行昂贵的浏览器搜索：
-原始语言和首个高价值扩展语言执行双通道，其余语言先走并行 API，证据缺口再由递归轮次
-补搜。相同查询会进行 15 分钟内存缓存，并将同时到达的重复请求合并为一次外部访问。
-API 与浏览器分别有独立延迟预算，慢源超时只影响自身，不阻塞其他来源。
+深度研究完整保留所有计划语言与 API、浏览器双通道。相同查询会进行 15 分钟内存缓存，
+并将同时到达的重复请求合并为一次外部访问。API 与浏览器分别有独立延迟预算，慢源超时
+只影响自身，不阻塞其他来源；失败会保留在质量报告中，不会被当作已覆盖。
 
 相关参数可通过 `OMNISEARCH_SEARCH_API_TIMEOUT_SECONDS`、
 `OMNISEARCH_SEARCH_BROWSER_TIMEOUT_SECONDS`、`OMNISEARCH_SEARCH_CACHE_TTL_SECONDS`、
 `OMNISEARCH_SEARCH_CACHE_MAX_ENTRIES`、`OMNISEARCH_RESEARCH_QUERY_CONCURRENCY`、
-`OMNISEARCH_ACQUISITION_CONCURRENCY` 和 `OMNISEARCH_BROWSER_LANGUAGE_LIMIT` 调整。
+`OMNISEARCH_ACQUISITION_CONCURRENCY` 调整。
+
+## 深度研究质量门
+
+运行时的深度研究只有同时取得 API 与浏览器通道的真实结果、每个子问题至少得到两个
+独立来源，并在启用深度采集预算时成功取得至少一份文档正文，才会标记为 `completed`。缺少任一项
+会优先生成恢复查询；预算结束后仍不满足时返回 `partial`，并在 `quality_issues` 和研究事件
+中明确记录缺失通道、证据不足的子问题或文档采集失败。实体去重不会丢失发现轨迹，同一
+资料被不同 Provider 找到时仍分别计入独立来源。
 
 ## REST 流程
 

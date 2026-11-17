@@ -236,7 +236,9 @@ class XBrowserAdapter(BrowserSearchAdapter):
         direct_url, indexed_url = self._search_urls(request)
         return [
             (direct_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+            (direct_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
             (indexed_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+            (indexed_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
         ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:

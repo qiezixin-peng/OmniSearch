@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     search_cache_max_entries: int = Field(default=2048, ge=1, le=100000)
     research_query_concurrency: int = Field(default=8, ge=1, le=64)
     acquisition_concurrency: int = Field(default=6, ge=1, le=32)
-    browser_language_limit: int = Field(default=2, ge=1, le=30)
 
 
 @lru_cache

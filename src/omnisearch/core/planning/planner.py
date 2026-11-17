@@ -44,7 +44,6 @@ class SearchPlanner:
         available_sources: set[str] | None = None,
         source_channels: dict[str, Channel] | None = None,
         require_dual_channel: bool = False,
-        browser_language_limit: int = 2,
     ) -> None:
         self.registry = registry
         self.analyzer = analyzer or HeuristicQueryAnalyzer()
@@ -57,7 +56,6 @@ class SearchPlanner:
             if source.adapters
         }
         self.require_dual_channel = require_dual_channel
-        self.browser_language_limit = max(1, browser_language_limit)
 
     async def plan_async(self, question: str, budget: ResearchBudget | None = None) -> ResearchPlan:
         plan = self.plan(question, budget)
@@ -76,9 +74,6 @@ class SearchPlanner:
         sub_questions = self._sub_questions(question, requested)[: budget.max_sub_questions]
         queries: list[PlannedQuery] = []
         variants = self.multilingual.expand(question, language, budget.max_languages)
-        browser_languages = {
-            variant_language for variant_language, _ in variants[: self.browser_language_limit]
-        }
         sources_by_question: dict[UUID, list[str]] = {}
         for sub_question in sub_questions:
             sources_by_question[sub_question.id] = [
@@ -94,21 +89,12 @@ class SearchPlanner:
             for sub_question in sub_questions:
                 if len(queries) >= budget.max_queries:
                     break
-                sources = sources_by_question[sub_question.id]
-                if variant_language not in browser_languages:
-                    api_sources = [
-                        source
-                        for source in sources
-                        if self.source_channels.get(source) is not Channel.BROWSER
-                    ]
-                    if api_sources:
-                        sources = api_sources
                 queries.append(
                     PlannedQuery(
                         sub_question_id=sub_question.id,
                         language=variant_language,
                         query=self._query_for(sub_question, variant_query),
-                        sources=sources,
+                        sources=sources_by_question[sub_question.id],
                         purpose=(
                             "original-language discovery"
                             if variant_language == language

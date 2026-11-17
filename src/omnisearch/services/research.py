@@ -40,6 +40,8 @@ class ResearchRunReport(StrictModel):
     sub_question_coverage: float = Field(ge=0, le=1)
     documents_acquired: int = Field(default=0, ge=0)
     acquisition_failures: list[str] = Field(default_factory=list)
+    quality_gate_passed: bool = True
+    quality_issues: list[str] = Field(default_factory=list)
 
 
 class ResearchCancelled(RuntimeError):
@@ -98,7 +100,7 @@ class ResearchExecutionService:
         self.acquisition = acquisition
         self.documents = documents
         self.max_acquisition_concurrency = max_acquisition_concurrency
-        self.gap_analyzer = gap_analyzer or GapAnalyzer()
+        self.gap_analyzer = gap_analyzer or GapAnalyzer(search.source_channels)
 
     async def run(self, research_id: UUID) -> ResearchRunReport:
         task = self.coordinator.get(research_id)
@@ -151,8 +153,7 @@ class ResearchExecutionService:
         outcomes = await asyncio.gather(*(execute(query) for query in initial_queries))
         executions = [outcome[0] for outcome in outcomes]
         response_history = [
-            (query, outcome[1])
-            for query, outcome in zip(initial_queries, outcomes, strict=True)
+            (query, outcome[1]) for query, outcome in zip(initial_queries, outcomes, strict=True)
         ]
         for round_number in range(2, task.budget.max_rounds + 1):
             self._ensure_active(research_id)
@@ -187,26 +188,42 @@ class ResearchExecutionService:
             if after == before:
                 break
         progress = self.repository.query_progress(research_id)
-        coverage = (
-            progress["with_results"] / progress["total"] if progress["total"] else 0.0
+        coverage = progress["with_results"] / progress["total"] if progress["total"] else 0.0
+        strict_quality = self.planner.require_dual_channel
+        evidence_coverage = self.repository.evidence_coverage(research_id)
+        covered_sub_questions = (
+            {
+                sub_question_id
+                for sub_question_id, evidence in evidence_coverage.items()
+                if len(evidence["sources"]) >= 2
+            }
+            if strict_quality
+            else self.repository.covered_sub_question_ids(research_id)
         )
-        covered_sub_questions = self.repository.covered_sub_question_ids(research_id)
         sub_question_coverage = (
-            len(covered_sub_questions) / len(plan.sub_questions)
-            if plan.sub_questions
-            else 0.0
+            len(covered_sub_questions) / len(plan.sub_questions) if plan.sub_questions else 0.0
         )
-        self.repository.update_sub_question_coverage(
-            research_id, covered_sub_questions
-        )
+        self.repository.update_sub_question_coverage(research_id, covered_sub_questions)
         summary = self.repository.search_summary(research_id)
         documents_acquired, acquisition_failures = await self._acquire_documents(
             research_id, task.budget.max_pages_to_fetch
         )
         self._ensure_active(research_id)
+        quality_issues = (
+            self._quality_issues(
+                plan,
+                evidence_coverage,
+                documents_acquired=documents_acquired,
+                require_documents=task.budget.max_pages_to_fetch > 0,
+            )
+            if strict_quality
+            else []
+        )
         final_status = (
             ResearchStatus.COMPLETED
-            if summary["unique_results"] > 0 and sub_question_coverage >= 0.75
+            if summary["unique_results"] > 0
+            and sub_question_coverage >= (1.0 if strict_quality else 0.75)
+            and not quality_issues
             else ResearchStatus.PARTIAL
         )
         failure_breakdown = Counter(
@@ -238,6 +255,8 @@ class ResearchExecutionService:
                 "documents_acquired": documents_acquired,
                 "acquisition_failures": len(acquisition_failures),
                 "acquisition_failure_details": acquisition_failures[:20],
+                "quality_gate_passed": not quality_issues,
+                "quality_issues": quality_issues,
             },
         )
         completed = self.coordinator.change_status(research_id, final_status)
@@ -251,15 +270,38 @@ class ResearchExecutionService:
             sub_question_coverage=sub_question_coverage,
             documents_acquired=documents_acquired,
             acquisition_failures=acquisition_failures,
+            quality_gate_passed=not quality_issues,
+            quality_issues=quality_issues,
         )
+
+    @staticmethod
+    def _quality_issues(
+        plan: ResearchPlan,
+        coverage: dict[UUID, dict[str, set[str]]],
+        *,
+        documents_acquired: int,
+        require_documents: bool,
+    ) -> list[str]:
+        issues: list[str] = []
+        observed_channels = {
+            channel for evidence in coverage.values() for channel in evidence["channels"]
+        }
+        for channel in ("api", "browser"):
+            if channel not in observed_channels:
+                issues.append(f"missing_channel_evidence:{channel}")
+        for sub_question in plan.sub_questions:
+            source_count = len(coverage.get(sub_question.id, {}).get("sources", set()))
+            if source_count < 2:
+                issues.append(f"insufficient_independent_sources:{sub_question.id}:{source_count}")
+        if require_documents and documents_acquired == 0:
+            issues.append("no_primary_documents_acquired")
+        return issues
 
     def _ensure_active(self, research_id: UUID) -> None:
         if self.coordinator.get(research_id).status is ResearchStatus.CANCELLED:
             raise ResearchCancelled(str(research_id))
 
-    async def _acquire_documents(
-        self, research_id: UUID, limit: int
-    ) -> tuple[int, list[str]]:
+    async def _acquire_documents(self, research_id: UUID, limit: int) -> tuple[int, list[str]]:
         if self.acquisition is None or self.documents is None or limit == 0:
             return 0, []
         candidates = self.repository.acquisition_candidates(research_id, limit)

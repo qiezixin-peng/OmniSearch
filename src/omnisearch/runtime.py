@@ -188,7 +188,6 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
             available_sources=search.configured_sources,
             source_channels=search.configured_source_channels,
             require_dual_channel=True,
-            browser_language_limit=settings.browser_language_limit,
         ),
         search,
         max_concurrency=settings.research_query_concurrency,

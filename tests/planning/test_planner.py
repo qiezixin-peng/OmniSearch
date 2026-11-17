@@ -106,30 +106,18 @@ def test_planner_excludes_runtime_sources_without_credentials() -> None:
     assert selected <= {"google", "duckduckgo", "arxiv", "crossref", "openalex"}
 
 
-def test_browser_search_is_limited_to_high_value_languages() -> None:
-    source_channels = {
-        "google": Channel.BROWSER,
-        "duckduckgo": Channel.BROWSER,
-        "brave": Channel.API,
-        "arxiv": Channel.API,
-        "crossref": Channel.API,
-        "openalex": Channel.API,
-    }
-    planner = SearchPlanner(
-        build_default_registry(),
-        source_channels=source_channels,
-        browser_language_limit=2,
-    )
+def test_every_planned_language_retains_direct_browser_discovery() -> None:
+    planner = SearchPlanner(build_default_registry())
 
     plan = planner.plan("音频水印开源项目与论文")
 
+    all_languages = {query.language for query in plan.queries}
     browser_languages = {
         query.language
         for query in plan.queries
-        if any(source_channels.get(source) is Channel.BROWSER for source in query.sources)
+        if any(planner.source_channels.get(source) is Channel.BROWSER for source in query.sources)
     }
-    assert browser_languages == {"zh", "en"}
-    assert {"ja", "de"} <= {query.language for query in plan.queries}
+    assert browser_languages == all_languages
 
 
 @pytest.mark.asyncio

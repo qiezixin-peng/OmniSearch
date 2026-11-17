@@ -164,15 +164,32 @@ async def test_x_browser_parser_accepts_indexed_post_fallback() -> None:
 async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
     calls: list[tuple[str, str]] = []
 
-    class RecordingFetcher(FakeFetcher):
+    class EmptyFetcher(FakeFetcher):
         async def fetch(self, request):
             calls.append((request.mode.value, str(request.url)))
             return await super().fetch(request)
 
-    empty = RecordingFetcher("<html><body>No posts</body></html>")
-    indexed = RecordingFetcher(
-        '<a href="https://x.com/researcher/status/789"><h3>Indexed post</h3></a>'
-    )
+    class IndexedOnlyFetcher(ContentFetcher):
+        async def fetch(self, request):
+            url = str(request.url)
+            calls.append((request.mode.value, url))
+            source = (
+                '<a href="https://x.com/researcher/status/789"><h3>Indexed post</h3></a>'
+                if "google.com/search" in url
+                else "<html><body>No posts</body></html>"
+            )
+            return FetchedDocument(
+                url=request.url,
+                final_url=request.url,
+                mode=request.mode,
+                status_code=200,
+                markdown="",
+                raw_html=source,
+                metadata={"engine": "fake"},
+            )
+
+    empty = EmptyFetcher("<html><body>No posts</body></html>")
+    indexed = IndexedOnlyFetcher()
     adapter = XBrowserAdapter(
         chrome_fetcher=indexed,
         ego_fetcher=empty,
@@ -181,9 +198,11 @@ async def test_x_uses_only_authenticated_direct_then_indexed_fallback() -> None:
 
     results = [item async for item in adapter.search(search_request())]
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0][0] == "ego_browser"
     assert calls[0][1].startswith("https://x.com/search")
     assert calls[1][0] == "chrome_managed"
-    assert calls[1][1].startswith("https://www.google.com/search")
+    assert calls[1][1].startswith("https://x.com/search")
+    assert calls[2][0] == "chrome_managed"
+    assert calls[2][1].startswith("https://www.google.com/search")
     assert results[0].external_identifiers == {"x_post_id": "789"}

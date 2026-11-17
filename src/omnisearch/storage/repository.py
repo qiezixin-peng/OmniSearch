@@ -81,9 +81,7 @@ class SqlResearchRepository:
                 dependencies[dependency.sub_question_id].append(UUID(dependency.depends_on_id))
             return self._to_domain(row, dependencies)
 
-    def transition(
-        self, task: ResearchTask, event_type: str, payload: dict
-    ) -> ResearchEvent:
+    def transition(self, task: ResearchTask, event_type: str, payload: dict) -> ResearchEvent:
         with self.database.session_factory.begin() as session:
             row = session.get(ResearchTaskRow, str(task.id))
             if row is None:
@@ -172,9 +170,7 @@ class SqlResearchRepository:
                 },
             )
 
-    def persist_search_response(
-        self, query_id: UUID, response: QuickSearchResponse
-    ) -> None:
+    def persist_search_response(self, query_id: UUID, response: QuickSearchResponse) -> None:
         with self.database.session_factory.begin() as session:
             query = session.get(QueryVariantRow, str(query_id))
             if query is None:
@@ -212,18 +208,41 @@ class SqlResearchRepository:
                     )
                     session.add(existing)
                     session.flush()
-                discovery = session.get(
-                    QueryResultDiscoveryRow, (str(query_id), existing.id)
-                )
+                raw_payload = dict(existing.raw_payload or {})
+                occurrences = list(raw_payload.get("occurrences") or [])
+                known = {
+                    (
+                        item.get("source_id"),
+                        item.get("adapter_id"),
+                        str(item.get("url", "")),
+                    )
+                    for item in occurrences
+                }
+                query_occurrences = [
+                    occurrence.model_dump(mode="json") for occurrence in merged.occurrences
+                ]
+                for serialized in query_occurrences:
+                    key = (
+                        serialized.get("source_id"),
+                        serialized.get("adapter_id"),
+                        str(serialized.get("url", "")),
+                    )
+                    if key not in known:
+                        occurrences.append(serialized)
+                        known.add(key)
+                discoveries = dict(raw_payload.get("discoveries") or {})
+                discoveries[str(query_id)] = query_occurrences
+                raw_payload["occurrences"] = occurrences
+                raw_payload["discoveries"] = discoveries
+                existing.raw_payload = raw_payload
+                discovery = session.get(QueryResultDiscoveryRow, (str(query_id), existing.id))
                 if discovery is None:
                     session.add(
                         QueryResultDiscoveryRow(
                             query_id=str(query_id), result_id=existing.id, rank=rank
                         )
                     )
-            query.status = (
-                "failed" if not response.results and response.failures else "completed"
-            )
+            query.status = "failed" if not response.results and response.failures else "completed"
             query.result_count = len(response.results)
             query.failure_count = len(response.failures)
             query.completed_at = datetime.now(UTC)
@@ -324,6 +343,43 @@ class SqlResearchRepository:
             ).all()
             return {UUID(identifier) for identifier in rows}
 
+    def evidence_coverage(self, research_id: UUID) -> dict[UUID, dict[str, set[str]]]:
+        with self.database.session_factory() as session:
+            rows = session.execute(
+                select(
+                    QueryVariantRow.id,
+                    QueryVariantRow.sub_question_id,
+                    SearchResultRow,
+                )
+                .join(
+                    QueryResultDiscoveryRow,
+                    QueryResultDiscoveryRow.query_id == QueryVariantRow.id,
+                )
+                .join(
+                    SearchResultRow,
+                    SearchResultRow.id == QueryResultDiscoveryRow.result_id,
+                )
+                .where(QueryVariantRow.research_id == str(research_id))
+                .distinct()
+            ).all()
+        coverage: dict[UUID, dict[str, set[str]]] = {}
+        for query_id, sub_question_id, result in rows:
+            item = coverage.setdefault(UUID(sub_question_id), {"sources": set(), "channels": set()})
+            raw_payload = result.raw_payload or {}
+            occurrences = (raw_payload.get("discoveries") or {}).get(query_id) or []
+            if not occurrences:
+                occurrences = raw_payload.get("occurrences") or [
+                    {"source_id": result.source_id, "channel": result.channel}
+                ]
+            for occurrence in occurrences:
+                source_id = occurrence.get("source_id")
+                channel = occurrence.get("channel")
+                if source_id:
+                    item["sources"].add(source_id)
+                if channel:
+                    item["channels"].add(channel)
+        return coverage
+
     def update_current_round(self, research_id: UUID, round_number: int) -> None:
         with self.database.session_factory.begin() as session:
             row = session.get(ResearchTaskRow, str(research_id))
@@ -358,10 +414,7 @@ class SqlResearchRepository:
                 .where(QueryVariantRow.research_id == str(research_id))
                 .order_by(QueryVariantRow.expansion_round, QueryVariantRow.id)
             ).all()
-        categories_by_id = {
-            question.id: set()
-            for question in task.sub_questions
-        }
+        categories_by_id = {question.id: set() for question in task.sub_questions}
         return ResearchPlan(
             question=task.question,
             original_language=task.original_language,
@@ -429,9 +482,7 @@ class SqlResearchRepository:
             )
             task = session.get(ResearchTaskRow, str(research_id))
             queries = session.scalars(
-                select(QueryVariantRow.query).where(
-                    QueryVariantRow.research_id == str(research_id)
-                )
+                select(QueryVariantRow.query).where(QueryVariantRow.research_id == str(research_id))
             ).all()
         research_text = " ".join([task.question if task else "", *queries])
         terms = self._relevance_terms(research_text)
@@ -560,20 +611,14 @@ class SqlResearchRepository:
                 raise ResearchNotFound(str(research_id))
             self._append_event(session, research_id, event_type, payload)
 
-    def update_sub_question_coverage(
-        self, research_id: UUID, covered_ids: set[UUID]
-    ) -> None:
+    def update_sub_question_coverage(self, research_id: UUID, covered_ids: set[UUID]) -> None:
         with self.database.session_factory.begin() as session:
             rows = session.scalars(
-                select(SubQuestionRow).where(
-                    SubQuestionRow.research_id == str(research_id)
-                )
+                select(SubQuestionRow).where(SubQuestionRow.research_id == str(research_id))
             ).all()
             for row in rows:
                 row.completed = UUID(row.id) in covered_ids
-                row.unresolved_questions = (
-                    [] if row.completed else ["本轮未找到足够的独立有效结果"]
-                )
+                row.unresolved_questions = [] if row.completed else ["本轮未找到足够的独立有效结果"]
 
     def coverage_matrix(self, research_id: UUID) -> list[dict]:
         task = self.get(research_id)
@@ -652,9 +697,7 @@ class SqlResearchRepository:
         )
 
     @staticmethod
-    def _to_domain(
-        row: ResearchTaskRow, dependencies: dict[str, list[UUID]]
-    ) -> ResearchTask:
+    def _to_domain(row: ResearchTaskRow, dependencies: dict[str, list[UUID]]) -> ResearchTask:
         return ResearchTask(
             id=UUID(row.id),
             question=row.question,

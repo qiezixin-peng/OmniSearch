@@ -2,6 +2,7 @@ import re
 from collections import Counter
 
 from omnisearch.core.planning import PlannedQuery, ResearchPlan
+from omnisearch.domain.enums import Channel
 from omnisearch.services.search import QuickSearchResponse
 
 
@@ -24,6 +25,9 @@ class GapAnalyzer:
         "with",
     }
 
+    def __init__(self, source_channels: dict[str, Channel] | None = None) -> None:
+        self.source_channels = source_channels or {}
+
     def next_queries(
         self,
         plan: ResearchPlan,
@@ -38,7 +42,48 @@ class GapAnalyzer:
         for query, response in responses:
             by_sub_question.setdefault(query.sub_question_id, []).append(response)
         generated: list[PlannedQuery] = []
+        observed_channels = {
+            occurrence.channel
+            for _query, response in responses
+            for result in response.results
+            for occurrence in result.occurrences
+        }
+        planned_channels = {
+            self.source_channels[source]
+            for query in plan.queries
+            for source in query.sources
+            if source in self.source_channels
+        }
+        for channel in sorted(planned_channels - observed_channels, key=lambda item: item.value):
+            if len(generated) >= remaining:
+                break
+            target = plan.sub_questions[0]
+            sources = list(
+                dict.fromkeys(
+                    source
+                    for query in plan.queries
+                    for source in query.sources
+                    if self.source_channels.get(source) is channel
+                )
+            )
+            if not sources:
+                continue
+            candidate = f"{target.objective} direct {channel.value} primary evidence verification"
+            if self._normalized(candidate) in used:
+                continue
+            generated.append(
+                PlannedQuery(
+                    sub_question_id=target.id,
+                    language=plan.original_language,
+                    query=candidate,
+                    sources=sources,
+                    purpose=f"required {channel.value} evidence recovery",
+                )
+            )
+            used.add(self._normalized(candidate))
         for sub_question in plan.sub_questions:
+            if len(generated) >= remaining:
+                break
             collected = by_sub_question.get(sub_question.id, [])
             independent_sources = {
                 occurrence.source_id
