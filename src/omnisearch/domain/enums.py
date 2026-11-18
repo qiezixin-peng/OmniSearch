@@ -49,6 +49,18 @@ class SourceRole(StrEnum):
     SPECIALIST = "specialist"
 
 
+class AdapterReliability(StrEnum):
+    """Operational expectation for one concrete provider path.
+
+    This is deliberately adapter-level: an official API and a browser scraper for
+    the same source do not have the same stability characteristics.
+    """
+
+    PUBLIC_API = "public_api"
+    CREDENTIALED_API = "credentialed_api"
+    BROWSER_BEST_EFFORT = "browser_best_effort"
+
+
 class EvidenceLevel(StrEnum):
     E1 = "E1"
     E2 = "E2"

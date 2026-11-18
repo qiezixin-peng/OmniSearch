@@ -52,6 +52,10 @@ async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
         result = await client.call_tool("list_sources", {})
         source_ids = {item["source_id"] for item in result.structured_content["result"]}
         assert {"google", "duckduckgo", "github", "arxiv", "crossref", "openalex"} <= source_ids
+        assert "semantic_scholar" not in source_ids
+        assert "reddit" not in source_ids
+        assert "x" not in source_ids
+        assert "youtube" not in source_ids
 
     assert server._runtime is not None
     server._runtime.close()

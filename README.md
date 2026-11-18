@@ -62,6 +62,10 @@ Camoufox仍作为独立内核灾备保留。
 
 ## 搜索池
 
+搜索池现在按 Adapter 公布可靠性等级和实时可用状态，不再因为代码已注册就把来源说成
+“可用”。每个渠道对应的官方 API、专用项目、保留/禁用决定见
+[逐渠道稳定性策略](docs/provider-stability.md)。
+
 默认搜索池已登记 Google、DuckDuckGo、Brave、GitHub、arXiv、Crossref、OpenAlex、
 Semantic Scholar、Google Scholar、Stack Exchange、Reddit、GitLab、CORE、RSSHub 和 Google
 Patents。搜索规划器按子问题类别选择多个独立来源，详情见

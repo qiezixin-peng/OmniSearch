@@ -4,7 +4,13 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
-from omnisearch.domain.enums import Channel, ResearchStatus, SourceCategory, SourceRole
+from omnisearch.domain.enums import (
+    AdapterReliability,
+    Channel,
+    ResearchStatus,
+    SourceCategory,
+    SourceRole,
+)
 
 
 def utc_now() -> datetime:
@@ -93,6 +99,7 @@ class ProviderCapabilities(StrictModel):
     requires_credentials: bool = False
     backend: str | None = None
     terms_policy: str | None = None
+    reliability_class: AdapterReliability = AdapterReliability.PUBLIC_API
 
 
 class SourceDefinition(StrictModel):

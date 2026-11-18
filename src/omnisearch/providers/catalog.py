@@ -1,4 +1,4 @@
-from omnisearch.domain.enums import Channel, SourceCategory, SourceRole
+from omnisearch.domain.enums import AdapterReliability, Channel, SourceCategory, SourceRole
 from omnisearch.domain.models import ProviderCapabilities, SourceDefinition
 from omnisearch.providers.registry import SourceRegistry
 
@@ -16,6 +16,7 @@ def _adapter(
     domain_filter: bool = False,
     pagination: bool = True,
     concurrency: int = 2,
+    reliability: AdapterReliability | None = None,
 ) -> ProviderCapabilities:
     return ProviderCapabilities(
         source_id=source_id,
@@ -30,6 +31,18 @@ def _adapter(
         max_concurrency=concurrency,
         requires_credentials=credentials,
         backend=backend,
+        reliability_class=(
+            reliability
+            or (
+                AdapterReliability.BROWSER_BEST_EFFORT
+                if channel is Channel.BROWSER
+                else (
+                    AdapterReliability.CREDENTIALED_API
+                    if credentials
+                    else AdapterReliability.PUBLIC_API
+                )
+            )
+        ),
     )
 
 
@@ -40,6 +53,7 @@ def _source(
     role: SourceRole,
     priority: int,
     *adapters: ProviderCapabilities,
+    enabled_by_default: bool = True,
 ) -> SourceDefinition:
     return SourceDefinition(
         source_id=source_id,
@@ -47,6 +61,7 @@ def _source(
         category=category,
         role=role,
         priority=priority,
+        enabled_by_default=enabled_by_default,
         adapters=list(adapters),
     )
 
@@ -229,9 +244,10 @@ def default_sources() -> list[SourceDefinition]:
                 Channel.API,
                 backend="semantic_scholar",
                 capabilities={"paper", "author", "citation", "recommendation"},
-                credentials=False,
+                credentials=True,
                 date_filter=True,
             ),
+            enabled_by_default=False,
         ),
         _source(
             "google_scholar",
@@ -298,6 +314,7 @@ def default_sources() -> list[SourceDefinition]:
                 backend="patchright_chrome+scrapling_chrome+camoufox+ego_browser",
                 capabilities={"post", "comment", "community"},
             ),
+            enabled_by_default=False,
         ),
         _source(
             "gitlab",
@@ -357,6 +374,7 @@ def default_sources() -> list[SourceDefinition]:
                 backend="patchright_chrome+scrapling_chrome+camoufox+ego_browser",
                 capabilities={"post", "author", "conversation", "recent"},
             ),
+            enabled_by_default=False,
         ),
         _source(
             "hacker_news",
@@ -460,6 +478,7 @@ def default_sources() -> list[SourceDefinition]:
                 backend="patchright_chrome+scrapling_chrome+camoufox+ego_browser",
                 capabilities={"video", "channel", "first_party_statement"},
             ),
+            enabled_by_default=False,
         ),
         _source(
             "bluesky",

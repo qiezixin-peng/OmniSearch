@@ -541,9 +541,30 @@ def search_documents(
     return runtime().documents.search_chunks(query, research_id=identifier, limit=limit)
 
 
-@mcp.tool(description="List registered search sources and their Agent-visible capabilities.")
-def list_sources() -> list[dict[str, Any]]:
-    return [source.model_dump(mode="json") for source in runtime().sources.list()]
+@mcp.tool(description="List search sources, adapter reliability classes and live availability.")
+async def list_sources() -> list[dict[str, Any]]:
+    engine = runtime()
+    health = await engine.search.health()
+    health_by_source = {item.source_id: item for item in health}
+    records: list[dict[str, Any]] = []
+    for source in engine.sources.list():
+        record = source.model_dump(mode="json")
+        live = health_by_source.get(source.source_id)
+        record["runtime"] = (
+            live.model_dump(mode="json")
+            if live is not None
+            else {
+                "source_id": source.source_id,
+                "configured": False,
+                "healthy": False,
+                "status": "not_registered",
+            }
+        )
+        record["auto_selectable"] = bool(
+            live is not None and live.configured and live.healthy
+        )
+        records.append(record)
+    return records
 
 
 @mcp.tool(description="Report runtime configuration and health for active source adapters.")

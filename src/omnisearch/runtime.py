@@ -190,40 +190,42 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     openalex_adapter = OpenAlexAdapter(api_key=openalex_key)
     crossref_adapter = CrossrefAdapter()
     rsshub_routes = [route.strip() for route in settings.rsshub_routes.split(",") if route.strip()]
+    provider_adapters = [
+        GitHubSearchAdapter(token=github_token),
+        ArxivAdapter(index_fallback=openalex_adapter),
+        crossref_adapter,
+        openalex_adapter,
+        StackExchangeAdapter(),
+        GitLabAdapter(token=gitlab_token),
+        reddit_browser,
+        CoreAdapter(api_key=core_key),
+        x_adapter,
+        BlueskyAdapter(),
+        HackerNewsAdapter(),
+        HuggingFaceAdapter(),
+        EuropePmcAdapter(),
+        RssHubAdapter(base_url=settings.rsshub_base_url, routes=rsshub_routes),
+        InternetArchiveAdapter(),
+        youtube_adapter,
+        brave_adapter,
+        GoogleBrowserAdapter(
+            **browser_adapter_options,
+        ),
+        DuckDuckGoBrowserAdapter(
+            **browser_adapter_options,
+        ),
+        GoogleScholarBrowserAdapter(
+            index_fallback=crossref_adapter,
+            **browser_adapter_options,
+        ),
+        GooglePatentsBrowserAdapter(
+            **browser_adapter_options,
+        ),
+    ]
+    if semantic_scholar_key:
+        provider_adapters.append(SemanticScholarAdapter(api_key=semantic_scholar_key))
     search = MultiSourceSearchService(
-        [
-            GitHubSearchAdapter(token=github_token),
-            ArxivAdapter(index_fallback=openalex_adapter),
-            crossref_adapter,
-            openalex_adapter,
-            SemanticScholarAdapter(api_key=semantic_scholar_key),
-            StackExchangeAdapter(),
-            GitLabAdapter(token=gitlab_token),
-            reddit_browser,
-            CoreAdapter(api_key=core_key),
-            x_adapter,
-            BlueskyAdapter(),
-            HackerNewsAdapter(),
-            HuggingFaceAdapter(),
-            EuropePmcAdapter(),
-            RssHubAdapter(base_url=settings.rsshub_base_url, routes=rsshub_routes),
-            InternetArchiveAdapter(),
-            youtube_adapter,
-            brave_adapter,
-            GoogleBrowserAdapter(
-                **browser_adapter_options,
-            ),
-            DuckDuckGoBrowserAdapter(
-                **browser_adapter_options,
-            ),
-            GoogleScholarBrowserAdapter(
-                index_fallback=crossref_adapter,
-                **browser_adapter_options,
-            ),
-            GooglePatentsBrowserAdapter(
-                **browser_adapter_options,
-            ),
-        ],
+        provider_adapters,
         api_timeout_seconds=settings.search_api_timeout_seconds,
         browser_timeout_seconds=settings.search_browser_timeout_seconds,
         browser_max_concurrency=settings.browser_global_concurrency,
