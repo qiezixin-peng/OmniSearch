@@ -263,6 +263,69 @@ def test_duckduckgo_attempts_diversify_endpoint_and_backend_early() -> None:
     assert adapter.min_interval_seconds == 5.0
 
 
+def test_duckduckgo_scrapling_chain_fits_source_latency_budget() -> None:
+    class NamedFetcher(FakeFetcher):
+        def __init__(self, name: str) -> None:
+            super().__init__("")
+            self.backend_name = name
+
+    chrome = NamedFetcher("patchright_chrome")
+    scrapling = NamedFetcher("scrapling_chrome")
+    ego = NamedFetcher("ego")
+    adapter = DuckDuckGoBrowserAdapter(
+        chrome_fetcher=chrome,
+        browser_fallback_fetchers=(scrapling,),
+        ego_fetcher=ego,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    attempts = adapter._attempts(search_request())
+
+    assert [mode.value for _, _, mode in attempts] == [
+        "http",
+        "http",
+        "chrome_managed",
+    ]
+    assert attempts[0][0] == attempts[1][0]
+    assert all(fetcher is scrapling for _, fetcher, _ in attempts[:2])
+    assert attempts[2][1] is chrome
+    total_outer_budget_ms = sum(
+        adapter._timeout_for_attempt(fetcher, mode) + 3_000
+        for _, fetcher, mode in attempts
+    )
+    assert total_outer_budget_ms == 25_000
+
+
+def test_duckduckgo_scoped_query_uses_relaxed_discovery_and_filters_scope() -> None:
+    class NamedFetcher(FakeFetcher):
+        backend_name = "scrapling_chrome"
+
+    fetcher = NamedFetcher("")
+    adapter = DuckDuckGoBrowserAdapter(
+        chrome_fetcher=fetcher,
+        browser_fallback_fetchers=(fetcher,),
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+    request = SearchRequest(
+        query_id=uuid4(),
+        query="music dashboard site:pinterest.com/pin",
+        max_results=5,
+    )
+
+    attempts = adapter._attempts(request)
+
+    assert "site%3A" not in attempts[0][0]
+    assert "pinterest+pin" in attempts[0][0]
+    assert "site%3Apinterest.com%2Fpin" in attempts[1][0]
+    candidates = [
+        {"title": "Pin", "url": "https://www.pinterest.com/pin/123/"},
+        {"title": "Ideas", "url": "https://www.pinterest.com/ideas/music/"},
+        {"title": "Other", "url": "https://example.org/pin/123/"},
+    ]
+    assert adapter._filter_candidates(candidates, request, attempts[0][0]) == [candidates[0]]
+
+
 @pytest.mark.asyncio
 async def test_google_scholar_parser_preserves_paper_snippet() -> None:
     source = """<html><body><div class="gs_ri">

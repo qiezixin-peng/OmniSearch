@@ -78,11 +78,7 @@ class BrowserSearchAdapter(ProviderAdapter):
         parsed_items: list[dict[str, str]] = []
         for url, fetcher, mode in self._attempts(request):
             try:
-                fetch_timeout_ms = (
-                    self.slow_backend_timeout_ms
-                    if getattr(fetcher, "backend_name", "") == "camoufox"
-                    else self.attempt_timeout_ms
-                )
+                fetch_timeout_ms = self._timeout_for_attempt(fetcher, mode)
                 async with asyncio.timeout((fetch_timeout_ms + 3_000) / 1_000):
                     document = await fetcher.fetch(
                         FetchRequest(
@@ -96,6 +92,11 @@ class BrowserSearchAdapter(ProviderAdapter):
                             ),
                             ego_task_name=(f"OmniSearch {self.source_id} {request.query_id}"),
                             solve_cloudflare=True,
+                            # The adapter owns the fallback chain. Backend-level
+                            # retries make one failed endpoint consume the whole
+                            # source budget and prevent the next independent path.
+                            retries=0,
+                            retry_delay_ms=0,
                             network_idle=False,
                             wait_selector=self.wait_selector,
                             wait_after_load_ms=self.wait_after_load_ms,
@@ -123,7 +124,9 @@ class BrowserSearchAdapter(ProviderAdapter):
                         if self.stop_on_access_denied:
                             break
                         continue
-                    candidates = self._parse(document.raw_html)
+                    candidates = self._filter_candidates(
+                        self._parse(document.raw_html), request, url
+                    )
                     prepared_candidates = await asyncio.gather(
                         *(
                             self._prepare_with_timeout(item)
@@ -225,6 +228,11 @@ class BrowserSearchAdapter(ProviderAdapter):
             return [*fast, (self.ego_fetcher, FetchMode.EGO_BROWSER), *camoufox]
         return candidates
 
+    def _timeout_for_attempt(self, fetcher: ContentFetcher, mode: FetchMode) -> int:
+        if getattr(fetcher, "backend_name", "") == "camoufox":
+            return self.slow_backend_timeout_ms
+        return self.attempt_timeout_ms
+
     @staticmethod
     def _backend_name(fetcher: ContentFetcher, mode: FetchMode) -> str:
         if mode is FetchMode.EGO_BROWSER:
@@ -233,6 +241,14 @@ class BrowserSearchAdapter(ProviderAdapter):
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         raise NotImplementedError
+
+    def _filter_candidates(
+        self,
+        candidates: list[dict[str, str]],
+        request: SearchRequest,
+        attempt_url: str,
+    ) -> list[dict[str, str]]:
+        return candidates
 
     def _result_type_for_url(self, url: str) -> str:
         parsed = urlparse(url)
@@ -390,7 +406,10 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
     # serialized. Space query starts so a multilingual research batch does
     # not turn into a self-inflicted temporary ban.
     min_interval_seconds = 5.0
-    attempt_timeout_ms = 12_000
+    # Three 12s attempts plus wrapper cleanup could never fit inside the
+    # service's 35s source budget. Keep the direct HTTP path short and leave
+    # enough time for a rotated-route retry and one real browser fallback.
+    attempt_timeout_ms = 6_000
     wait_after_load_ms = 2_000
     wait_selector = '[data-testid="result-title-a"], a.result__a'
     managed_browser_proxy_ref = "omnisearch://sticky-proxy"
@@ -410,6 +429,7 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
         html_url, dynamic_url = self._search_urls(request)
+        relaxed_url = self._relaxed_search_url(request)
         attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
         scrapling = next(
             (
@@ -420,16 +440,29 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
             None,
         )
         if scrapling is not None:
-            # The lightweight official endpoint is materially faster and less
-            # challenge-prone than the JavaScript search page. Keep real
-            # browsers as independent fallbacks for coverage.
-            attempts.append((html_url, scrapling, FetchMode.HTTP))
-        attempts.extend(
-            [
-                (dynamic_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
-                (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-            ]
-        )
+            # The official Lite endpoint normally completes in about one second.
+            # On a challenge, BrowserSearchAdapter rotates the sticky route; retry
+            # the same low-cost endpoint once on the new egress before launching
+            # Chrome. Ego used to sit between these attempts and repeatedly spent
+            # 12s on the same challenge page without improving result coverage.
+            attempts.extend(
+                [
+                    (
+                        relaxed_url if relaxed_url != html_url else html_url,
+                        scrapling,
+                        FetchMode.HTTP,
+                    ),
+                    (html_url, scrapling, FetchMode.HTTP),
+                    (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+                ]
+            )
+        else:
+            attempts.extend(
+                [
+                    (dynamic_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+                    (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+                ]
+            )
         if scrapling is None:
             fallback = next(
                 (
@@ -442,6 +475,59 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
             if fallback is not None:
                 attempts.append((dynamic_url, fallback, FetchMode.CHROME_MANAGED))
         return attempts[: self.max_attempts]
+
+    def _timeout_for_attempt(self, fetcher: ContentFetcher, mode: FetchMode) -> int:
+        # Including the outer 3s cancellation/cleanup allowance, the worst-case
+        # chain is 8s + 8s + 9s = 25s, safely below the 35s source deadline.
+        return 5_000 if mode is FetchMode.HTTP else 6_000
+
+    def _relaxed_search_url(self, request: SearchRequest) -> str:
+        query = request.query + (f" site:{request.domain}" if request.domain else "")
+        scopes = re.findall(r"(?i)(?:^|\s)site:([^\s]+)", query)
+        if not scopes:
+            return self._search_url(request)
+        query = re.sub(r"(?i)(?:^|\s)site:[^\s]+", " ", query)
+        query = " ".join(query.split())
+        scope_terms = " ".join(self._scope_terms(scope) for scope in scopes)
+        return f"https://lite.duckduckgo.com/lite/?q={quote_plus(query + ' ' + scope_terms)}"
+
+    @staticmethod
+    def _scope_terms(scope: str) -> str:
+        host, _, path = scope.casefold().removeprefix("www.").partition("/")
+        labels = host.split(".")
+        # Search by recognizable site name rather than the literal hostname.
+        # DuckDuckGo commonly returns no results for "dribbble.com" while the
+        # equivalent "dribbble shots" query has the expected indexed pages.
+        host_terms = labels[:-1] if len(labels) > 1 else labels
+        return " ".join([*host_terms, *path.split("/")]).strip()
+
+    def _filter_candidates(
+        self,
+        candidates: list[dict[str, str]],
+        request: SearchRequest,
+        attempt_url: str,
+    ) -> list[dict[str, str]]:
+        if attempt_url != self._relaxed_search_url(request):
+            return candidates
+        query = request.query + (f" site:{request.domain}" if request.domain else "")
+        scopes = re.findall(r"(?i)(?:^|\s)site:([^\s]+)", query)
+        if not scopes:
+            return candidates
+
+        def matches_scope(candidate: dict[str, str]) -> bool:
+            parsed = urlparse(candidate["url"])
+            host = (parsed.hostname or "").casefold().removeprefix("www.")
+            path = parsed.path.casefold().rstrip("/")
+            for scope in scopes:
+                normalized = scope.casefold().removeprefix("www.").rstrip("/")
+                scope_host, _, scope_path = normalized.partition("/")
+                if host != scope_host and not host.endswith("." + scope_host):
+                    continue
+                if not scope_path or path.startswith("/" + scope_path):
+                    return True
+            return False
+
+        return [candidate for candidate in candidates if matches_scope(candidate)]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
