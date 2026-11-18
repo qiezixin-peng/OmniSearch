@@ -320,26 +320,45 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
     adapter_id = "google_chrome"
     min_interval_seconds = 2.0
     access_denied_cooldown_seconds = 900.0
-    prefer_ego_before_camoufox = True
     preferred_backends = (
-        "ego_browser",
-        "patchright_chrome",
         "scrapling_chrome",
         "camoufox",
+        "patchright_chrome",
+        "ego_browser",
     )
     # Keep Ego on the user's automatically selected proxy, but make managed
     # browser fallbacks independent of node changes.
     managed_browser_proxy_ref = "omnisearch://sticky-proxy"
-    max_attempts = 3
-    attempt_timeout_ms = 8_000
+    max_attempts = 2
+    # Scrapling's first browser startup can take longer than Patchright. Two
+    # 14-second regional attempts, including cancellation allowances, fit just
+    # inside the 35s source budget and avoid a false cold-start fallback.
+    attempt_timeout_ms = 14_000
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        stealth = next(
+            (
+                fetcher
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") == "scrapling_chrome"
+            ),
+            None,
+        )
+        if stealth is not None:
+            primary = self._search_url_for_host(request, "www.google.com.hk")
+            alternate = self._search_url_for_host(request, "www.google.co.jp")
+            # Standard Chromium is challenged on the available proxy pool,
+            # while Scrapling's real stealth browser succeeds on the same
+            # egress. Regional frontends also avoid repeatedly striking one
+            # already restricted endpoint. Each challenge rotates the sticky
+            # route before the next attempt.
+            return [
+                (primary, stealth, FetchMode.CHROME_MANAGED),
+                (alternate, stealth, FetchMode.CHROME_MANAGED),
+            ]
         primary, text_only = self._search_urls(request)
         relaxed = self._relaxed_search_url(request)
         if relaxed != primary:
-            # Google sometimes returns an empty shell for site: filters even
-            # though the same terms have useful results. Retry once without
-            # the operator before spending time on another browser engine.
             return [
                 (primary, self.ego_fetcher, FetchMode.EGO_BROWSER),
                 (primary, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
@@ -352,22 +371,28 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
         ]
 
     def _search_url(self, request: SearchRequest) -> str:
+        return self._search_url_for_host(request, "www.google.com")
+
+    @staticmethod
+    def _search_url_for_host(request: SearchRequest, host: str) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
         language = (request.language or "en").split("-", 1)[0]
-        return f"https://www.google.com/search?q={quote_plus(query)}&hl={language}&num=20"
+        return f"https://{host}/search?q={quote_plus(query)}&hl={language}&num=10"
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
         primary = self._search_url(request)
         separator = "&" if "?" in primary else "?"
         return [primary, f"{primary}{separator}udm=14&filter=0"]
 
-    def _relaxed_search_url(self, request: SearchRequest) -> str:
+    def _relaxed_search_url(
+        self, request: SearchRequest, *, host: str = "www.google.com"
+    ) -> str:
         query = re.sub(r"(?i)(?:^|\s)site:\S+", " ", request.query)
         query = " ".join(query.split())
         if query == request.query and request.domain is None:
-            return self._search_url(request)
+            return self._search_url_for_host(request, host)
         language = (request.language or "en").split("-", 1)[0]
-        return f"https://www.google.com/search?q={quote_plus(query)}&hl={language}&num=20"
+        return f"https://{host}/search?q={quote_plus(query)}&hl={language}&num=10"
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)

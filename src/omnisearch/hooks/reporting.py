@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from collections.abc import Iterable
 from typing import Any
@@ -107,23 +108,37 @@ def _decode_text(value: str) -> Any | None:
 
 
 def response_payloads(response: Any) -> list[Any]:
-    payloads = [response]
     if isinstance(response, str):
         decoded = _decode_text(response)
-        return [decoded] if decoded is not None else payloads
+        return [decoded] if decoded is not None else [response]
     if not isinstance(response, dict):
-        return payloads
+        return [response]
 
     structured = response.get("structuredContent")
     if structured is not None:
-        payloads.append(structured)
+        # MCP often mirrors the same value into structuredContent, content and
+        # a compatibility result field. Prefer the authoritative structured
+        # payload so one provider failure is not reported three times.
+        return [structured]
+    payloads = []
     for block in response.get("content") or []:
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
         decoded = _decode_text(block.get("text", ""))
         if decoded is not None:
             payloads.append(decoded)
-    return payloads
+    return payloads or [response]
+
+
+def _failure_identity(value: str) -> tuple[str, ...]:
+    labels = dict(
+        re.findall(
+            r"(source_id|adapter_id|channel|code|status)=([^,；]+)", value
+        )
+    )
+    if labels:
+        return tuple(labels.values())
+    return (value,)
 
 
 def build_report(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -133,7 +148,10 @@ def build_report(event: dict[str, Any]) -> dict[str, Any] | None:
     failures: list[str] = []
     for payload in response_payloads(event.get("tool_response")):
         failures.extend(collect_failures(payload))
-    unique = list(dict.fromkeys(failures))
+    unique_by_identity: dict[tuple[str, ...], str] = {}
+    for failure in failures:
+        unique_by_identity.setdefault(_failure_identity(failure), failure)
+    unique = list(unique_by_identity.values())
     if not unique:
         return None
 

@@ -73,6 +73,29 @@ async def test_managed_chrome_preserves_full_scrapling_capabilities(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_managed_chrome_keeps_one_attempt_when_extra_retries_are_disabled(
+    tmp_path,
+) -> None:
+    captured = {}
+
+    async def fake_chrome(url: str, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(headers={})
+
+    fetcher = ScraplingFetcher(chrome_fetch=fake_chrome)
+    await fetcher.fetch(
+        FetchRequest(
+            url="https://example.com",
+            mode=FetchMode.CHROME_MANAGED,
+            chrome_user_data_dir=str(tmp_path / "profile"),
+            retries=0,
+        )
+    )
+
+    assert captured["retries"] == 1
+
+
+@pytest.mark.asyncio
 async def test_ego_mode_cannot_leak_into_scrapling() -> None:
     fetcher = ScraplingFetcher()
     with pytest.raises(FetchPolicyError, match="dedicated ego adapter"):

@@ -80,3 +80,31 @@ def test_degraded_source_health_requires_user_visible_report() -> None:
     assert report is not None
     assert "openalex" in report["systemMessage"]
     assert "degraded" in report["systemMessage"]
+
+
+def test_mirrored_mcp_payload_and_batch_failures_are_collapsed() -> None:
+    failure = {
+        "source_id": "google",
+        "adapter_id": "google_chrome",
+        "code": "ACCESS_DENIED",
+        "message": "first query was challenged",
+    }
+    payload = {
+        "result": [
+            {"failures": [failure]},
+            {"failures": [{**failure, "message": "second query was challenged"}]},
+        ],
+        "failures": [failure],
+    }
+    event = {
+        "tool_name": "mcp__omnisearch__search_batch",
+        "tool_response": {
+            "structuredContent": payload,
+            "content": [{"type": "text", "text": __import__("json").dumps(payload)}],
+        },
+    }
+
+    report = build_report(event)
+
+    assert report is not None
+    assert report["systemMessage"].count("source_id=google") == 1

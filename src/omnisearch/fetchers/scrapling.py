@@ -90,7 +90,9 @@ class ScraplingFetcher(ContentFetcher):
             "timeout": request.timeout_ms,
             "locale": request.locale,
             "proxy": proxy,
-            "retries": request.retries,
+            # Scrapling's browser engine requires at least one attempt, while
+            # OmniSearch uses zero to disable backend-level *extra* retries.
+            "retries": max(1, request.retries),
             "retry_delay": request.retry_delay_ms / 1000,
             "solve_cloudflare": request.solve_cloudflare,
             "block_ads": request.block_ads,

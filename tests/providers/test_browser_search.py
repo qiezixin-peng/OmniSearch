@@ -79,6 +79,33 @@ def test_google_restrictive_query_rotates_managed_route_before_relaxed_retry() -
     assert "Google+Cloud+credits" in attempts[2][0]
 
 
+def test_google_prefers_scrapling_regional_frontends_when_available() -> None:
+    class NamedFetcher(FakeFetcher):
+        backend_name = "scrapling_chrome"
+
+    chrome = FakeFetcher("")
+    stealth = NamedFetcher("")
+    adapter = GoogleBrowserAdapter(
+        chrome_fetcher=chrome,
+        browser_fallback_fetchers=(stealth,),
+        ego_fetcher=chrome,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    attempts = adapter._attempts(search_request())
+
+    assert len(attempts) == 2
+    assert all(fetcher is stealth for _, fetcher, _ in attempts)
+    assert all(mode.value == "chrome_managed" for _, _, mode in attempts)
+    assert "google.com.hk" in attempts[0][0]
+    assert "google.co.jp" in attempts[1][0]
+    assert "num=10" in attempts[0][0]
+    assert sum(
+        adapter._timeout_for_attempt(fetcher, mode) + 3_000
+        for _, fetcher, mode in attempts
+    ) == 34_000
+
+
 @pytest.mark.asyncio
 async def test_google_retries_after_challenge_using_rotated_managed_route() -> None:
     rotations: list[str] = []
