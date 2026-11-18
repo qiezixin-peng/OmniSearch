@@ -35,7 +35,7 @@ class SemanticScholarAdapter(HttpProvider, ProviderAdapter):
             search_capabilities={"paper", "author", "citation"},
             supports_pagination=True,
             max_concurrency=1,
-            requires_credentials=False,
+            requires_credentials=True,
             backend="semantic_scholar",
         )
 

@@ -18,6 +18,9 @@
 - 增加跨窗口 Provider 尝试日志、诊断 MCP/REST 接口和进程日志归档；同时加入 DuckDuckGo
   HTML 回退、双 DoH 校验以及 Semantic Scholar 无密钥限速与长熔断，降低浏览器解析失败、
   Fake-IP DNS 误伤和重复限流。
+- 将主路径成功与备用引擎恢复分开统计并显式返回 `FALLBACK_USED`；Google、DuckDuckGo 改用
+  实测稳定的首选浏览器，API 启动节流改为并发安全，OpenAlex、Crossref、arXiv、匿名 GitHub
+  增加来源级间隔，Semantic Scholar 无密钥时不再标记为可用。
 
 ## 0.1.0 — 2026-11-17
 

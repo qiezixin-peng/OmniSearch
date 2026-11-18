@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from time import monotonic
 
 import pytest
 
@@ -184,3 +185,67 @@ async def test_records_success_failure_and_circuit_skip() -> None:
     assert events[0]["code"] == "RATE_LIMITED"
     assert events[0]["query_hash"] != events[1]["query_hash"]
     assert all(len(item["query_hash"]) == 64 for item in events)
+
+
+@pytest.mark.asyncio
+async def test_recovered_fallback_is_not_counted_as_primary_success_and_is_cached() -> None:
+    events: list[dict] = []
+    adapter = FakeAdapter("google", [paper("google", "https://example.org/paper")])
+    adapter.results[0].raw_payload = {
+        "fallback_used": True,
+        "failed_attempts": ["patchright_chrome: no results"],
+        "browser_engine": "ego-browser",
+    }
+    calls = 0
+    original_search = adapter.search
+
+    async def counted(request: SearchRequest) -> AsyncIterator[SearchResult]:
+        nonlocal calls
+        calls += 1
+        async for result in original_search(request):
+            yield result
+
+    adapter.search = counted  # type: ignore[method-assign]
+    service = MultiSourceSearchService(
+        [adapter], cache_ttl_seconds=60, attempt_recorder=events.append
+    )
+    command = QuickSearchCommand(query="watermark", sources=["google"])
+
+    first = await service.search(command)
+    second = await service.search(command)
+
+    assert calls == 1
+    assert first.failures[0].code == "FALLBACK_USED"
+    assert second.failures[0].code == "FALLBACK_USED"
+    assert events[0]["outcome"] == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_start_times_are_serialized_even_with_provider_concurrency() -> None:
+    class ConcurrentAdapter(FakeAdapter):
+        min_interval_seconds = 0.02
+
+        @property
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                source_id=self.source_id,
+                adapter_id=f"{self.source_id}_api",
+                category=SourceCategory.ACADEMIC,
+                channel=Channel.API,
+                max_concurrency=3,
+            )
+
+        async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+            starts.append(monotonic())
+            yield paper(self.source_id, f"https://example.org/{request.query}")
+
+    starts: list[float] = []
+    service = MultiSourceSearchService([ConcurrentAdapter("openalex")])
+
+    await asyncio.gather(
+        *(service.search(QuickSearchCommand(query=str(i), sources=["openalex"])) for i in range(3))
+    )
+
+    assert len(starts) == 3
+    assert starts[1] - starts[0] >= 0.015
+    assert starts[2] - starts[1] >= 0.015

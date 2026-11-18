@@ -34,6 +34,7 @@ def request() -> SearchRequest:
 @pytest.mark.asyncio
 async def test_github_normalization() -> None:
     async def handler(incoming: httpx.Request) -> httpx.Response:
+        assert len(incoming.url.params["q"]) <= 256
         return httpx.Response(
             200,
             json={
@@ -60,6 +61,16 @@ async def test_github_normalization() -> None:
         results = [item async for item in GitHubSearchAdapter(client=client).search(request())]
     assert results[0].title == "org/detector"
     assert results[0].external_identifiers == {"github_repo_id": "7"}
+
+
+def test_github_long_query_is_shortened_on_a_word_boundary() -> None:
+    query = "audio watermark " * 40
+
+    normalized = GitHubSearchAdapter._normalized_query(query)
+
+    assert len(normalized) <= 256
+    assert not normalized.endswith(" ")
+    assert normalized.split()[-1] in {"audio", "watermark"}
 
 
 @pytest.mark.asyncio

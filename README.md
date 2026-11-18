@@ -130,6 +130,11 @@ Agent 的主运行保障。
 成功率与失败聚合。Provider 尝试记录保留 90 天；进程重启前的 stdout/stderr 会转存到运行
 目录的 `logs/archive`。
 
+诊断指标严格区分 `primary_success_rate` 与 `effective_completion_rate`。如果 API 或首选浏览器
+失败后由备用引擎救回，该次记为 `recovered` 并仍向 Agent 返回 `FALLBACK_USED`，不会再被
+包装成主路径成功。Google 默认使用实测稳定的 Ego Browser，DuckDuckGo 默认使用 Camoufox；
+学术和代码 API 使用按来源串行启动限速，避免并发请求绕过最小间隔。
+
 Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright
 环境相互隔离，避免版本依赖冲突。
 

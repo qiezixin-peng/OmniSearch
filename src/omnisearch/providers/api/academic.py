@@ -27,6 +27,7 @@ def _date(value: str | None) -> datetime | None:
 
 class ArxivAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://export.arxiv.org/api/query"
+    min_interval_seconds = 3.0
 
     def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
         super().__init__(client=client, user_agent="OmniSearch/0.1 arXiv research client")
@@ -103,6 +104,7 @@ class ArxivAdapter(HttpProvider, ProviderAdapter):
 
 class CrossrefAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.crossref.org/works"
+    min_interval_seconds = 1.0
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -160,6 +162,7 @@ class CrossrefAdapter(HttpProvider, ProviderAdapter):
 
 class OpenAlexAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.openalex.org/works"
+    min_interval_seconds = 1.0
 
     def __init__(
         self, *, client: httpx.AsyncClient | None = None, api_key: str | None = None
@@ -181,7 +184,7 @@ class OpenAlexAdapter(HttpProvider, ProviderAdapter):
             search_capabilities={"paper", "author", "institution", "citation"},
             supports_pagination=True,
             supports_date_filter=True,
-            max_concurrency=3,
+            max_concurrency=1,
             backend="openalex",
         )
 

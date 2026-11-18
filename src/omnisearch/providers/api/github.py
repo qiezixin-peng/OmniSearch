@@ -10,6 +10,7 @@ from omnisearch.providers.base import ProviderAdapter
 
 class GitHubSearchAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.github.com/search/repositories"
+    min_interval_seconds = 6.5
 
     def __init__(
         self, *, client: httpx.AsyncClient | None = None, token: str | None = None
@@ -28,7 +29,7 @@ class GitHubSearchAdapter(HttpProvider, ProviderAdapter):
             search_capabilities={"repository"},
             supports_pagination=True,
             supports_date_filter=True,
-            max_concurrency=2,
+            max_concurrency=1,
             requires_credentials=False,
             backend="github_rest",
         )
@@ -44,7 +45,7 @@ class GitHubSearchAdapter(HttpProvider, ProviderAdapter):
         payload = await self._get_json(
             self.endpoint,
             params={
-                "q": request.query,
+                "q": self._normalized_query(request.query),
                 "per_page": request.max_results,
                 "page": page,
                 "sort": "stars",
@@ -74,3 +75,13 @@ class GitHubSearchAdapter(HttpProvider, ProviderAdapter):
                     "updated_at": item.get("updated_at"),
                 },
             )
+
+    @staticmethod
+    def _normalized_query(query: str) -> str:
+        # GitHub repository search rejects queries longer than 256 characters.
+        # Preserve complete terms rather than sending a request known to return 422.
+        normalized = " ".join(query.split())
+        if len(normalized) <= 256:
+            return normalized
+        shortened = normalized[:256].rsplit(" ", 1)[0].strip()
+        return shortened or normalized[:256]

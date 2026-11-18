@@ -21,6 +21,8 @@ class BrowserSearchAdapter(ProviderAdapter):
     attempt_timeout_ms = 12_000
     wait_after_load_ms = 1_200
     prefer_ego_before_camoufox = False
+    preferred_backends: tuple[str, ...] = ()
+    stop_on_access_denied = False
 
     def __init__(
         self,
@@ -90,6 +92,8 @@ class BrowserSearchAdapter(ProviderAdapter):
                     if self._is_access_denied(document):
                         access_denied = True
                         failures.append(f"{mode.value} {url}: access challenge or rate limit")
+                        if self.stop_on_access_denied:
+                            break
                         continue
                     candidates = self._parse(document.raw_html)
                     prepared_candidates = await asyncio.gather(
@@ -133,7 +137,12 @@ class BrowserSearchAdapter(ProviderAdapter):
                     if item.get("external_id_name") and item.get("external_id")
                     else {}
                 ),
-                raw_payload={"rank": rank, "browser_engine": document.metadata.get("engine")},
+                raw_payload={
+                    "rank": rank,
+                    "browser_engine": document.metadata.get("engine"),
+                    "fallback_used": bool(failures),
+                    "failed_attempts": failures[:10],
+                },
             )
             if rank >= request.max_results:
                 break
@@ -152,6 +161,18 @@ class BrowserSearchAdapter(ProviderAdapter):
         ]
 
     def _fetcher_sequence(self) -> list[tuple[ContentFetcher, FetchMode]]:
+        candidates = [
+            *((fetcher, FetchMode.CHROME_MANAGED) for fetcher in self.browser_fetchers),
+            (self.ego_fetcher, FetchMode.EGO_BROWSER),
+        ]
+        if self.preferred_backends:
+            priorities = {
+                backend: index for index, backend in enumerate(self.preferred_backends)
+            }
+            return sorted(
+                candidates,
+                key=lambda item: priorities.get(self._backend_name(*item), len(priorities)),
+            )
         if self.prefer_ego_before_camoufox:
             fast = [
                 (fetcher, FetchMode.CHROME_MANAGED)
@@ -164,10 +185,13 @@ class BrowserSearchAdapter(ProviderAdapter):
                 if getattr(fetcher, "backend_name", "") == "camoufox"
             ]
             return [*fast, (self.ego_fetcher, FetchMode.EGO_BROWSER), *camoufox]
-        return [
-            *((fetcher, FetchMode.CHROME_MANAGED) for fetcher in self.browser_fetchers),
-            (self.ego_fetcher, FetchMode.EGO_BROWSER),
-        ]
+        return candidates
+
+    @staticmethod
+    def _backend_name(fetcher: ContentFetcher, mode: FetchMode) -> str:
+        if mode is FetchMode.EGO_BROWSER:
+            return "ego_browser"
+        return str(getattr(fetcher, "backend_name", type(fetcher).__name__))
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         raise NotImplementedError
@@ -208,6 +232,12 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
     min_interval_seconds = 2.0
     access_denied_cooldown_seconds = 900.0
     prefer_ego_before_camoufox = True
+    preferred_backends = (
+        "ego_browser",
+        "patchright_chrome",
+        "scrapling_chrome",
+        "camoufox",
+    )
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -252,6 +282,12 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
 class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
     source_id = "duckduckgo"
     adapter_id = "duckduckgo_chrome"
+    preferred_backends = (
+        "camoufox",
+        "patchright_chrome",
+        "scrapling_chrome",
+        "ego_browser",
+    )
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -523,6 +559,13 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     min_interval_seconds = 30.0
     access_denied_cooldown_seconds = 21_600.0
     prefer_ego_before_camoufox = True
+    preferred_backends = (
+        "ego_browser",
+        "patchright_chrome",
+        "scrapling_chrome",
+        "camoufox",
+    )
+    stop_on_access_denied = True
 
     def _search_url(self, request: SearchRequest) -> str:
         language = (request.language or "en").split("-", 1)[0]

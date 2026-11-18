@@ -42,6 +42,9 @@ class ProviderTelemetryRepository:
                         case((ProviderAttemptRow.outcome == "failure", 1), else_=0)
                     ).label("failures"),
                     func.sum(
+                        case((ProviderAttemptRow.outcome == "recovered", 1), else_=0)
+                    ).label("recoveries"),
+                    func.sum(
                         case((ProviderAttemptRow.outcome == "circuit_skip", 1), else_=0)
                     ).label("circuit_skips"),
                     func.avg(ProviderAttemptRow.latency_ms).label("average_latency_ms"),
@@ -79,9 +82,16 @@ class ProviderTelemetryRepository:
                     "source_id": row.source_id,
                     "attempts": int(row.attempts or 0),
                     "successes": int(row.successes or 0),
+                    "recovered_attempts": int(row.recoveries or 0),
                     "failed_attempts": int(row.failures or 0),
                     "circuit_skips": int(row.circuit_skips or 0),
-                    "success_rate": round((row.successes or 0) / row.attempts, 4)
+                    "primary_success_rate": round((row.successes or 0) / row.attempts, 4)
+                    if row.attempts
+                    else 0.0,
+                    "effective_completion_rate": round(
+                        ((row.successes or 0) + (row.recoveries or 0)) / row.attempts,
+                        4,
+                    )
                     if row.attempts
                     else 0.0,
                     "average_latency_ms": round(float(row.average_latency_ms or 0), 1),

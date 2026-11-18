@@ -57,9 +57,11 @@ def test_provider_attempts_are_persisted_and_aggregated(tmp_path) -> None:
             "source_id": "openalex",
             "attempts": 3,
             "successes": 1,
+            "recovered_attempts": 0,
             "failed_attempts": 1,
             "circuit_skips": 1,
-            "success_rate": 0.3333,
+            "primary_success_rate": 0.3333,
+            "effective_completion_rate": 0.3333,
             "average_latency_ms": 83.3,
         }
     ]

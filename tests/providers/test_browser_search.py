@@ -90,7 +90,7 @@ async def test_browser_search_falls_back_to_ego() -> None:
 
 
 @pytest.mark.asyncio
-async def test_browser_search_uses_camoufox_before_ego() -> None:
+async def test_duckduckgo_uses_proven_camoufox_backend_as_primary() -> None:
     calls: list[str] = []
 
     class BrokenFetcher(ContentFetcher):
@@ -122,8 +122,9 @@ async def test_browser_search_uses_camoufox_before_ego() -> None:
     )
     results = [item async for item in adapter.search(search_request())]
 
-    assert calls == ["patchright", "camoufox"]
+    assert calls == ["camoufox"]
     assert results[0].raw_payload["browser_engine"] == "camoufox"
+    assert results[0].raw_payload["fallback_used"] is False
 
 
 @pytest.mark.asyncio
@@ -347,7 +348,10 @@ async def test_youtube_accepts_duckduckgo_index_redirects() -> None:
 @pytest.mark.asyncio
 async def test_browser_challenge_is_reported_as_access_denied() -> None:
     class ChallengeFetcher(ContentFetcher):
+        calls = 0
+
         async def fetch(self, request):
+            self.calls += 1
             return FetchedDocument(
                 url=request.url,
                 final_url=request.url,
@@ -367,3 +371,4 @@ async def test_browser_challenge_is_reported_as_access_denied() -> None:
         _ = [item async for item in adapter.search(search_request())]
 
     assert raised.value.code == "ACCESS_DENIED"
+    assert fetcher.calls == 1

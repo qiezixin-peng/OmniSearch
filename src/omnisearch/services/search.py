@@ -33,6 +33,7 @@ class _SourceState:
 class _CacheEntry:
     expires_at: float
     records: list[SearchResult]
+    failure: "SourceFailure | None" = None
 
 
 class QuickSearchCommand(StrictModel):
@@ -93,6 +94,7 @@ class MultiSourceSearchService:
             source_id: asyncio.Semaphore(adapter.capabilities.max_concurrency)
             for source_id, adapter in self._adapters.items()
         }
+        self._rate_locks = {source_id: asyncio.Lock() for source_id in self._adapters}
         self._states = {source_id: _SourceState() for source_id in self._adapters}
         self.api_timeout_seconds = api_timeout_seconds
         self.browser_timeout_seconds = browser_timeout_seconds
@@ -229,7 +231,7 @@ class MultiSourceSearchService:
         async with self._cache_lock:
             cached = self._cache.get(key)
             if cached is not None and cached.expires_at > now:
-                return list(cached.records), None
+                return list(cached.records), cached.failure
             if cached is not None:
                 self._cache.pop(key, None)
             task = self._inflight.get(key)
@@ -244,7 +246,7 @@ class MultiSourceSearchService:
                     if self._inflight.get(key) is task:
                         self._inflight.pop(key, None)
         records, failure = outcome
-        if failure is None and self.cache_ttl_seconds > 0:
+        if (failure is None or records) and self.cache_ttl_seconds > 0:
             async with self._cache_lock:
                 self._prune_cache()
                 if key not in self._cache and len(self._cache) >= self.cache_max_entries:
@@ -252,6 +254,7 @@ class MultiSourceSearchService:
                 self._cache[key] = _CacheEntry(
                     expires_at=monotonic() + self.cache_ttl_seconds,
                     records=list(records),
+                    failure=failure,
                 )
         return list(records), failure
 
@@ -315,10 +318,11 @@ class MultiSourceSearchService:
             try:
                 started_at = monotonic()
                 minimum_interval = float(getattr(adapter, "min_interval_seconds", 0.0))
-                delay = state.next_allowed_at - monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                state.next_allowed_at = monotonic() + minimum_interval
+                async with self._rate_locks[source_id]:
+                    delay = state.next_allowed_at - monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    state.next_allowed_at = monotonic() + minimum_interval
                 with tracer.start_as_current_span(
                     "provider.search",
                     attributes={
@@ -339,6 +343,21 @@ class MultiSourceSearchService:
                 state.last_failure_code = None
                 state.last_error = None
                 state.last_success_at = datetime.now(UTC)
+                fallback_failure = self._fallback_failure(records, adapter)
+                if fallback_failure is not None:
+                    self._record_attempt(
+                        source_id=source_id,
+                        adapter_id=adapter.capabilities.adapter_id,
+                        channel=adapter.capabilities.channel.value,
+                        outcome="recovered",
+                        command=command,
+                        code=fallback_failure.code,
+                        message=fallback_failure.message,
+                        retryable=True,
+                        latency_ms=int((monotonic() - started_at) * 1000),
+                        result_count=len(records),
+                    )
+                    return records, fallback_failure
                 self._record_attempt(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
@@ -442,6 +461,29 @@ class MultiSourceSearchService:
             else:
                 cooldown = 60.0
             state.open_until = monotonic() + cooldown
+
+    @staticmethod
+    def _fallback_failure(
+        records: list[SearchResult], adapter: ProviderAdapter
+    ) -> SourceFailure | None:
+        reasons: list[str] = []
+        for record in records:
+            payload = record.raw_payload
+            api_reason = payload.get("api_fallback_reason")
+            if api_reason:
+                reasons.append(f"API fallback reason: {api_reason}")
+            if payload.get("fallback_used"):
+                reasons.extend(str(item) for item in payload.get("failed_attempts", []))
+        unique = list(dict.fromkeys(reasons))
+        if not unique:
+            return None
+        return SourceFailure(
+            source_id=adapter.capabilities.source_id,
+            adapter_id=adapter.capabilities.adapter_id,
+            code="FALLBACK_USED",
+            message="primary path failed before recovery: " + "; ".join(unique[:10]),
+            retryable=True,
+        )
 
     def _record_attempt(
         self,
