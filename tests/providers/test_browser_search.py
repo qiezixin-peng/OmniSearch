@@ -54,6 +54,79 @@ async def test_google_result_parser() -> None:
     assert str(results[0].url) == "https://example.org/paper"
 
 
+def test_google_restrictive_query_rotates_managed_route_before_relaxed_retry() -> None:
+    chrome = FakeFetcher("")
+    ego = FakeFetcher("")
+    adapter = GoogleBrowserAdapter(
+        chrome_fetcher=chrome,
+        ego_fetcher=ego,
+        chrome_user_data_dir="C:/dedicated",
+    )
+    request = SearchRequest(
+        query_id=uuid4(),
+        query="site:cloud.google.com/free Google Cloud credits",
+        max_results=5,
+    )
+
+    attempts = adapter._attempts(request)
+
+    assert len(attempts) == 3
+    assert attempts[0][1] is ego
+    assert attempts[1][1] is chrome
+    assert "site%3Acloud.google.com%2Ffree" in attempts[1][0]
+    assert attempts[2][1] is chrome
+    assert "site%3A" not in attempts[2][0]
+    assert "Google+Cloud+credits" in attempts[2][0]
+
+
+@pytest.mark.asyncio
+async def test_google_retries_after_challenge_using_rotated_managed_route() -> None:
+    rotations: list[str] = []
+
+    class EmptyEgo(FakeFetcher):
+        pass
+
+    class ChallengeThenSuccess(ContentFetcher):
+        calls = 0
+
+        async def fetch(self, request):
+            self.calls += 1
+            source = (
+                "<html>Our systems have detected unusual traffic</html>"
+                if self.calls == 1
+                else '<a href="https://cloud.google.com/free"><h3>Google Cloud Free</h3></a>'
+            )
+            return FetchedDocument(
+                url=request.url,
+                final_url=request.url,
+                mode=request.mode,
+                status_code=200,
+                markdown="",
+                raw_html=source,
+                metadata={"engine": "fake"},
+            )
+
+    chrome = ChallengeThenSuccess()
+    adapter = GoogleBrowserAdapter(
+        chrome_fetcher=chrome,
+        ego_fetcher=EmptyEgo("<html>No matching results</html>"),
+        chrome_user_data_dir="C:/dedicated",
+        route_rotator=lambda reason: rotations.append(reason) or "alternate",
+    )
+    request = SearchRequest(
+        query_id=uuid4(),
+        query="site:cloud.google.com/free Google Cloud credits",
+        max_results=5,
+    )
+
+    results = [item async for item in adapter.search(request)]
+
+    assert chrome.calls == 2
+    assert rotations == ["google:access_denied"]
+    assert str(results[0].url) == "https://cloud.google.com/free"
+    assert results[0].raw_payload["fallback_used"] is True
+
+
 @pytest.mark.asyncio
 async def test_browser_discovery_classifies_repository_url_as_code_evidence() -> None:
     source = """<a href="https://github.com/facebookresearch/audioseal">

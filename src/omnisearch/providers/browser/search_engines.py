@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -298,6 +299,26 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
     # Keep Ego on the user's automatically selected proxy, but make managed
     # browser fallbacks independent of node changes.
     managed_browser_proxy_ref = "omnisearch://sticky-proxy"
+    max_attempts = 3
+    attempt_timeout_ms = 8_000
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        primary, text_only = self._search_urls(request)
+        relaxed = self._relaxed_search_url(request)
+        if relaxed != primary:
+            # Google sometimes returns an empty shell for site: filters even
+            # though the same terms have useful results. Retry once without
+            # the operator before spending time on another browser engine.
+            return [
+                (primary, self.ego_fetcher, FetchMode.EGO_BROWSER),
+                (primary, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+                (relaxed, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+            ]
+        return [
+            (primary, self.ego_fetcher, FetchMode.EGO_BROWSER),
+            (primary, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+            (text_only, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+        ]
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -309,6 +330,14 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
         separator = "&" if "?" in primary else "?"
         return [primary, f"{primary}{separator}udm=14&filter=0"]
 
+    def _relaxed_search_url(self, request: SearchRequest) -> str:
+        query = re.sub(r"(?i)(?:^|\s)site:\S+", " ", request.query)
+        query = " ".join(query.split())
+        if query == request.query and request.domain is None:
+            return self._search_url(request)
+        language = (request.language or "en").split("-", 1)[0]
+        return f"https://www.google.com/search?q={quote_plus(query)}&hl={language}&num=20"
+
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
         records: list[dict[str, str]] = []
@@ -319,7 +348,8 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
             parsed = urlparse(href)
             is_google_redirect = href.startswith("/goto?")
             if not is_google_redirect and (
-                parsed.scheme not in {"http", "https"} or "google." in parsed.netloc
+                parsed.scheme not in {"http", "https"}
+                or self._is_google_search_host(parsed.hostname)
             ):
                 continue
             title = " ".join(anchor.xpath(".//h3//text()"))
@@ -339,9 +369,15 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
                 final_url = str(response.url)
         except httpx.HTTPError:
             return None
-        if "google." in urlparse(final_url).netloc:
+        if self._is_google_search_host(urlparse(final_url).hostname):
             return None
         return {**item, "url": final_url}
+
+    @staticmethod
+    def _is_google_search_host(hostname: str | None) -> bool:
+        """Reject Google search navigation without dropping Google-owned sources."""
+        host = (hostname or "").lower().rstrip(".")
+        return host == "google.com" or host.startswith("www.google.")
 
 
 class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
