@@ -91,6 +91,18 @@ omnisearch-migrate
 omnisearch-api
 ```
 
+本地 Windows 默认安装只包含实际运行所需的核心、浏览器和开发依赖。PostgreSQL/S3 部署
+另装 `.[cloud]`，向 OTLP 后端导出链路另装 `.[telemetry]`；这两组不再进入本地必装集，
+避免 Agent 启动时携带未使用的云 SDK、数据库驱动和遥测导出器。完整部署可使用
+`.[browser,cloud,telemetry]`。
+
+`requirements-local.lock` 固定当前 Windows Agent 的精简依赖；`requirements.lock` 保留包含
+云端与遥测扩展的完整验证基线。两者用途分开，避免普通本地更新重新引入未使用组件。
+
+MCP 入口只加载工具契约；数据库、Provider、浏览器、Worker、采集与评测代码在相关工具
+第一次调用时才加载。该调整不改变工具名称或搜索覆盖，但能缩短新窗口连接和故障恢复时
+的冷启动路径。
+
 Windows 原生运行脚本会同时管理本机 RSSHub（端口 1200）。RSSHub 用于订阅 Google
 News、Reuters、项目发布和其他站点路由的最新内容，是持续资料补充源，不替代 Google
 网页搜索。可用 `OMNISEARCH_RSSHUB_ROUTES` 逗号分隔配置需要检索的路由。

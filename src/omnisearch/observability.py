@@ -1,12 +1,9 @@
 import logging
 from threading import Lock
+from typing import Any
 
 import structlog
 from opentelemetry import metrics, trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 _lock = Lock()
 _configured = False
@@ -28,8 +25,24 @@ def configure_observability(service_name: str = "omnisearch", endpoint: str | No
             wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
-        provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-        if endpoint:
+        provider: Any = None
+        try:
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+        except ImportError as error:
+            # The local Windows profile only needs the lightweight API. Install the
+            # telemetry extra when exporting production traces.
+            if endpoint:
+                raise RuntimeError(
+                    "OTLP export requires the OmniSearch telemetry extra: "
+                    "pip install -e '.[telemetry]'"
+                ) from error
+        else:
+            provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+        if endpoint and provider is not None:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
             exporter_endpoint = (
                 endpoint
                 if endpoint.rstrip("/").endswith("/v1/traces")
@@ -38,7 +51,8 @@ def configure_observability(service_name: str = "omnisearch", endpoint: str | No
             provider.add_span_processor(
                 BatchSpanProcessor(OTLPSpanExporter(endpoint=exporter_endpoint))
             )
-        trace.set_tracer_provider(provider)
+        if provider is not None:
+            trace.set_tracer_provider(provider)
         _configured = True
 
 

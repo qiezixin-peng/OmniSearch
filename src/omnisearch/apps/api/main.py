@@ -7,7 +7,6 @@ from uuid import UUID
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 
 from omnisearch.config import get_settings
@@ -62,7 +61,12 @@ app = FastAPI(
     description="Agent-first multilingual research search and acquisition API",
     lifespan=lifespan,
 )
-FastAPIInstrumentor.instrument_app(app)
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+except ImportError:
+    FastAPIInstrumentor = None
+if FastAPIInstrumentor is not None:
+    FastAPIInstrumentor.instrument_app(app)
 
 
 @app.middleware("http")

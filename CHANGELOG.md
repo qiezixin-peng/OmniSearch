@@ -9,6 +9,9 @@
 - 全局研究入口升级为 OmniSearch 与 Agent 内置网页搜索双路径；新增
   `merge_search_results` MCP 工具，按稳定标识和规范化 URL 去重，并保留引擎与查询发现
   轨迹供 Agent 复核语义近重复项。
+- MCP 冷启动改为按需加载完整 Runtime、Worker、采集、爬取和质量评测模块；质量基准接口
+  改为惰性导入。PostgreSQL/S3 与 OTLP 导出依赖拆分为 `cloud`、`telemetry` 可选组，保持
+  Windows 本地 Agent 运行面精简而不删除生产部署能力。
 
 - Windows 原生运行脚本升级为逐组件 Supervisor，使用真实 API、MCP 协议、Worker 心跳和
   RSSHub 健康检查恢复异常进程；

@@ -1,5 +1,6 @@
-# Generated from the verified Python 3.14 development environment on 2026-11-17.
-# Install the project itself first or use: python -m pip install -r requirements.lock
+# Full-profile lock generated from the verified Python 3.14 development environment on 2026-11-17.
+# It includes cloud and telemetry extras. Windows local Agent installs should prefer
+# requirements-local.lock or: python -m pip install -e ".[dev,browser]"
 alembic==1.20.1
 annotated-doc==0.0.6
 annotated-types==0.8.0

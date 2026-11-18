@@ -1,23 +1,23 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os
 import socket
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field, HttpUrl
 
 from omnisearch.core.evidence import EvidenceEvaluator, EvidenceItem
-from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
 from omnisearch.domain.enums import Channel, ResearchStatus, SourceCategory
 from omnisearch.domain.models import ResearchBudget, ResearchCreate, SearchResult, StrictModel
-from omnisearch.quality.metrics import evaluate_quality
-from omnisearch.runtime import OmniRuntime, build_runtime
-from omnisearch.services.acquisition import AcquisitionRequest
-from omnisearch.services.crawl import CrawlRequest
 from omnisearch.services.search import MultiSourceSearchService, QuickSearchCommand
-from omnisearch.workers import ResearchWorker
+
+if TYPE_CHECKING:
+    from omnisearch.core.planning import ResearchPlan
+    from omnisearch.runtime import OmniRuntime
 
 mcp = MCPServer(
     "OmniSearch",
@@ -76,6 +76,8 @@ def _build_agent_plan(
     sub_questions: list[AgentSubQuestion],
     queries: list[AgentPlannedQuery],
 ) -> ResearchPlan:
+    from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
+
     if not sub_questions or not queries:
         raise ValueError("agent-supplied planning requires both sub_questions and queries")
     if len(sub_questions) > budget.max_sub_questions:
@@ -154,11 +156,15 @@ def _plan_channel_summary(engine: OmniRuntime, plan: ResearchPlan) -> dict[str, 
 def runtime() -> OmniRuntime:
     global _runtime
     if _runtime is None:
+        from omnisearch.runtime import build_runtime
+
         _runtime = build_runtime()
     return _runtime
 
 
 def _schedule_worker() -> None:
+    from omnisearch.workers.research_worker import ResearchWorker
+
     engine = runtime()
     worker = ResearchWorker(
         f"{socket.gethostname()}-{os.getpid()}",
@@ -500,6 +506,8 @@ def evaluate_search_quality(
     citation_checks: list[bool] | None = None,
     k: int = 10,
 ) -> dict[str, Any]:
+    from omnisearch.quality.metrics import evaluate_quality
+
     return evaluate_quality(
         retrieved_keys,
         set(relevant_keys),
@@ -518,6 +526,8 @@ async def fetch_page(
     solve_cloudflare: bool = True,
     respect_robots_txt: bool = True,
 ) -> dict[str, Any]:
+    from omnisearch.services.acquisition import AcquisitionRequest
+
     engine = runtime()
     document = await engine.acquisition.fetch(
         AcquisitionRequest(
@@ -540,6 +550,8 @@ async def fetch_batch(
     use_browser_fallback: bool = True,
     solve_cloudflare: bool = True,
 ) -> list[dict[str, Any]]:
+    from omnisearch.services.acquisition import AcquisitionRequest
+
     if not 1 <= len(urls) <= 50:
         raise ValueError("urls must contain between 1 and 50 items")
     engine = runtime()
@@ -583,6 +595,8 @@ async def crawl_site(
     use_browser_fallback: bool = True,
     solve_cloudflare: bool = True,
 ) -> dict[str, Any]:
+    from omnisearch.services.crawl import CrawlRequest
+
     report = await runtime().crawler.crawl(
         CrawlRequest(
             seed_url=seed_url,

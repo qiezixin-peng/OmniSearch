@@ -30,7 +30,13 @@ class S3ObjectStore:
         secret_key: str | None = None,
         region: str = "us-east-1",
     ) -> None:
-        import boto3
+        try:
+            import boto3
+        except ImportError as error:
+            raise RuntimeError(
+                "S3 object storage requires the OmniSearch cloud extra: "
+                "pip install -e '.[cloud]'"
+            ) from error
 
         self.bucket = bucket
         self.client = boto3.client(
