@@ -6,6 +6,8 @@
 
 ### Changed
 
+- Windows 下 Ego Browser 与 Camoufox 子进程统一使用无窗口启动标志；SessionStart Hook
+  直接复用当前 PowerShell 宿主，不再创建可能闪现的嵌套终端。
 - 全局研究入口升级为 OmniSearch 与 Agent 内置网页搜索双路径；新增
   `merge_search_results` MCP 工具，按稳定标识和规范化 URL 去重，并保留引擎与查询发现
   轨迹供 Agent 复核语义近重复项。

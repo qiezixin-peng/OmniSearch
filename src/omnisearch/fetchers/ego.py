@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import subprocess
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,13 @@ class EgoBrowserUnavailable(RuntimeError):
 
 
 Runner = Callable[[Sequence[str]], Awaitable[tuple[int, str, str]]]
+
+
+def _subprocess_options() -> dict[str, Any]:
+    """Keep CLI bridges fully backgrounded on Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
 
 
 class EgoBrowserFetcher(ContentFetcher):
@@ -142,6 +151,7 @@ try {{
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_subprocess_options(),
             )
         except FileNotFoundError as error:
             raise EgoBrowserUnavailable("ego-browser executable was not found") from error

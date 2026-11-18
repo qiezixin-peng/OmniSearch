@@ -2,12 +2,9 @@ $ErrorActionPreference = "Stop"
 $Supervisor = Join-Path $PSScriptRoot "windows-native.ps1"
 
 try {
-    $Output = & powershell.exe `
-        -NoProfile `
-        -ExecutionPolicy Bypass `
-        -File $Supervisor `
-        Ensure `
-        -Quiet 2>&1
+    # Run in the existing Hook host. Starting a nested powershell.exe can flash
+    # a console window even when the parent Agent application has no console.
+    $Output = & $Supervisor Ensure -Quiet 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ($Output -join [Environment]::NewLine)
     }

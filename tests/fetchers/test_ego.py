@@ -1,8 +1,19 @@
 import json
+import os
+import subprocess
 
 import pytest
 
 from omnisearch.fetchers import EgoBrowserFetcher, FetchMode, FetchRequest
+from omnisearch.fetchers.ego import _subprocess_options
+
+
+def test_ego_bridge_process_is_hidden_on_windows() -> None:
+    options = _subprocess_options()
+    if os.name == "nt":
+        assert options["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in options
 
 
 @pytest.mark.asyncio

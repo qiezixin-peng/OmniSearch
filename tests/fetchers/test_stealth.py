@@ -1,3 +1,5 @@
+import os
+import subprocess
 from contextlib import asynccontextmanager
 
 import pytest
@@ -9,6 +11,15 @@ from omnisearch.fetchers import (
     PatchrightFetcher,
     StealthBrowserUnavailable,
 )
+from omnisearch.fetchers.stealth import _subprocess_options
+
+
+def test_camoufox_bridge_process_is_hidden_on_windows() -> None:
+    options = _subprocess_options()
+    if os.name == "nt":
+        assert options["creationflags"] == subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in options
 
 
 class FakeResponse:

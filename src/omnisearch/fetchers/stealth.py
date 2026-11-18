@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import subprocess
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -7,6 +9,13 @@ from typing import Any
 
 from omnisearch.fetchers.base import ContentFetcher, FetchPolicyError
 from omnisearch.fetchers.models import FetchedDocument, FetchMode, FetchRequest
+
+
+def _subprocess_options() -> dict[str, Any]:
+    """Keep isolated browser bridges fully backgrounded on Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
 
 
 class StealthBrowserUnavailable(RuntimeError):
@@ -204,6 +213,7 @@ class CamoufoxFetcher(ContentFetcher):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_subprocess_options(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(
