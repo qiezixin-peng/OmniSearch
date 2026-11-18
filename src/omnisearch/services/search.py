@@ -22,6 +22,7 @@ from omnisearch.providers.base import ProviderAdapter, ProviderError
 class _SourceState:
     consecutive_failures: int = 0
     open_until: float = 0.0
+    stale_first_until: float = 0.0
     next_allowed_at: float = 0.0
     last_failure_code: str | None = None
     last_error: str | None = None
@@ -88,6 +89,9 @@ class MultiSourceSearchService:
         cache_ttl_seconds: float = 900.0,
         cache_max_entries: int = 2048,
         attempt_recorder: Callable[[dict[str, Any]], None] | None = None,
+        stale_fallback_loader: (
+            Callable[[str, QuickSearchCommand], list[SearchResult]] | None
+        ) = None,
     ) -> None:
         self._adapters = {adapter.capabilities.source_id: adapter for adapter in adapters}
         self._semaphores = {
@@ -101,11 +105,55 @@ class MultiSourceSearchService:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.cache_max_entries = cache_max_entries
         self._attempt_recorder = attempt_recorder
+        self._stale_fallback_loader = stale_fallback_loader
         self._cache: dict[tuple, _CacheEntry] = {}
         self._inflight: dict[
             tuple, asyncio.Task[tuple[list[SearchResult], SourceFailure | None]]
         ] = {}
         self._cache_lock = asyncio.Lock()
+
+    def seed_persistent_health(
+        self,
+        report: dict[str, Any],
+        *,
+        cooldown_seconds: float = 900.0,
+        minimum_failures: int = 3,
+    ) -> None:
+        """Restore provider degradation hints across process restarts.
+
+        Only providers with repeated failures and no successful or recovered
+        attempt are paused. A later process start re-evaluates the durable
+        window, so this avoids paying the same timeout on every Agent turn
+        without permanently disabling a source.
+        """
+        failure_codes: dict[str, str] = {}
+        for item in report.get("failure_summary", []):
+            failure_codes.setdefault(item["source_id"], item["code"])
+        for item in report.get("sources", []):
+            source_id = item["source_id"]
+            adapter = self._adapters.get(source_id)
+            if adapter is None:
+                continue
+            failures = int(item.get("failed_attempts", 0))
+            completions = int(item.get("successes", 0)) + int(
+                item.get("recovered_attempts", 0)
+            )
+            if adapter.capabilities.channel is Channel.BROWSER:
+                # Do not circuit-break a proxy-sensitive browser provider.
+                # Prefer exact persisted results briefly, but still try live
+                # when no matching cache exists or the hint expires.
+                if failures >= minimum_failures and failures > completions * 2:
+                    state = self._states[source_id]
+                    state.consecutive_failures = failures
+                    state.stale_first_until = monotonic() + min(cooldown_seconds, 300.0)
+                continue
+            if source_id not in self._states or failures < minimum_failures or completions:
+                continue
+            state = self._states[source_id]
+            state.consecutive_failures = failures
+            state.open_until = max(state.open_until, monotonic() + cooldown_seconds)
+            state.last_failure_code = failure_codes.get(source_id, "PERSISTENT_FAILURE")
+            state.last_error = "paused from durable provider diagnostics"
 
     @property
     def available_sources(self) -> set[str]:
@@ -271,6 +319,31 @@ class MultiSourceSearchService:
         adapter: ProviderAdapter,
     ) -> tuple[list[SearchResult], SourceFailure | None]:
         state = self._states[source_id]
+        if state.stale_first_until > monotonic():
+            cached = self._load_stale_records(source_id, command)
+            if cached:
+                failure = SourceFailure(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    code="STALE_CACHE_USED",
+                    message=(
+                        "provider is temporarily degraded; reused recent persisted results "
+                        "while the browser route cools down"
+                    ),
+                    retryable=True,
+                )
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="recovered",
+                    command=command,
+                    code=failure.code,
+                    message=failure.message,
+                    retryable=True,
+                    result_count=len(cached),
+                )
+                return cached, failure
         if state.open_until > monotonic():
             self._record_attempt(
                 source_id=source_id,
@@ -340,6 +413,7 @@ class MultiSourceSearchService:
                         records = [item async for item in adapter.search(request)]
                 state.consecutive_failures = 0
                 state.open_until = 0.0
+                state.stale_first_until = 0.0
                 state.last_failure_code = None
                 state.last_error = None
                 state.last_success_at = datetime.now(UTC)
@@ -383,13 +457,14 @@ class MultiSourceSearchService:
                     latency_ms=int((monotonic() - started_at) * 1000),
                 )
                 search_failures.add(1, {"source.id": source_id, "error.code": "TIMEOUT"})
-                return [], SourceFailure(
+                failure = SourceFailure(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
                     code="TIMEOUT",
                     message=message,
                     retryable=True,
                 )
+                return self._recover_from_stale_cache(source_id, command, adapter, failure)
             except ProviderError as error:
                 self._record_failure(source_id, error.code, error.retryable, str(error))
                 self._record_attempt(
@@ -404,13 +479,14 @@ class MultiSourceSearchService:
                     latency_ms=int((monotonic() - started_at) * 1000),
                 )
                 search_failures.add(1, {"source.id": source_id, "error.code": error.code})
-                return [], SourceFailure(
+                failure = SourceFailure(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
                     code=error.code,
                     message=str(error),
                     retryable=error.retryable,
                 )
+                return self._recover_from_stale_cache(source_id, command, adapter, failure)
             except Exception as error:  # isolate an adapter bug from other sources
                 self._record_failure(source_id, "ADAPTER_ERROR", False, str(error))
                 self._record_attempt(
@@ -431,6 +507,56 @@ class MultiSourceSearchService:
                     message=str(error),
                 )
 
+    def _recover_from_stale_cache(
+        self,
+        source_id: str,
+        command: QuickSearchCommand,
+        adapter: ProviderAdapter,
+        failure: SourceFailure,
+    ) -> tuple[list[SearchResult], SourceFailure]:
+        records = self._load_stale_records(source_id, command)
+        if not records:
+            return [], failure
+        for record in records:
+            record.raw_payload = {
+                **record.raw_payload,
+                "stale_cache_used": True,
+                "live_failure_code": failure.code,
+                "live_failure_message": failure.message,
+            }
+        recovered = SourceFailure(
+            source_id=source_id,
+            adapter_id=adapter.capabilities.adapter_id,
+            code="STALE_CACHE_USED",
+            message=(
+                f"live path failed ({failure.code}); reused recent persisted results "
+                "for the exact query and source"
+            ),
+            retryable=True,
+        )
+        self._record_attempt(
+            source_id=source_id,
+            adapter_id=adapter.capabilities.adapter_id,
+            channel=adapter.capabilities.channel.value,
+            outcome="recovered",
+            command=command,
+            code=recovered.code,
+            message=recovered.message,
+            retryable=True,
+            result_count=len(records),
+        )
+        return records, recovered
+
+    def _load_stale_records(
+        self, source_id: str, command: QuickSearchCommand
+    ) -> list[SearchResult]:
+        if self._stale_fallback_loader is None:
+            return []
+        try:
+            return self._stale_fallback_loader(source_id, command)
+        except Exception:
+            return []
+
     @staticmethod
     def _cache_key(source_id: str, command: QuickSearchCommand) -> tuple:
         return (
@@ -449,6 +575,13 @@ class MultiSourceSearchService:
         state.last_failure_code = code
         state.last_error = message
         state.last_failure_at = datetime.now(UTC)
+        # Browser failures are commonly route/IP/session specific. The adapter
+        # already bounds and rotates its browser backends, so a provider-wide
+        # circuit would incorrectly skip later queries after a proxy change.
+        if self._adapters[source_id].capabilities.channel is Channel.BROWSER:
+            if state.consecutive_failures >= 2:
+                state.stale_first_until = monotonic() + 300.0
+            return
         immediate = code in {"RATE_LIMITED", "ACCESS_DENIED", "NOT_CONFIGURED"}
         if immediate or not retryable or state.consecutive_failures >= 2:
             adapter = self._adapters[source_id]

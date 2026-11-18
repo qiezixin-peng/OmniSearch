@@ -1,19 +1,21 @@
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
-from omnisearch.domain.enums import ResearchStatus
+from omnisearch.domain.enums import Channel, ResearchStatus
 from omnisearch.domain.models import (
     ResearchBudget,
     ResearchEvent,
     ResearchTask,
+    SearchResult,
     SubQuestion,
 )
-from omnisearch.services.search import QuickSearchResponse
+from omnisearch.services.search import QuickSearchCommand, QuickSearchResponse
 from omnisearch.storage.database import Database
 from omnisearch.storage.tables import (
     QueryResultDiscoveryRow,
@@ -208,6 +210,21 @@ class SqlResearchRepository:
                     )
                     session.add(existing)
                     session.flush()
+                richer_types = {occurrence.result_type for occurrence in merged.occurrences}
+                type_priority = {
+                    "repository": 0,
+                    "paper": 0,
+                    "patent": 0,
+                    "documentation": 1,
+                    "web_page": 2,
+                    "web": 2,
+                    "post": 3,
+                    "discussion": 3,
+                }
+                existing.result_type = min(
+                    {existing.result_type, *richer_types},
+                    key=lambda value: type_priority.get(value, 1),
+                )
                 raw_payload = dict(existing.raw_payload or {})
                 occurrences = list(raw_payload.get("occurrences") or [])
                 known = {
@@ -364,7 +381,19 @@ class SqlResearchRepository:
             ).all()
         coverage: dict[UUID, dict[str, set[str]]] = {}
         for query_id, sub_question_id, result in rows:
-            item = coverage.setdefault(UUID(sub_question_id), {"sources": set(), "channels": set()})
+            item = coverage.setdefault(
+                UUID(sub_question_id),
+                {
+                    "sources": set(),
+                    "channels": set(),
+                    "result_types": set(),
+                    "hosts": set(),
+                },
+            )
+            item["result_types"].add(result.result_type)
+            host = (urlsplit(result.canonical_url).hostname or "").lower()
+            if host:
+                item["hosts"].add(host)
             raw_payload = result.raw_payload or {}
             occurrences = (raw_payload.get("discoveries") or {}).get(query_id) or []
             if not occurrences:
@@ -378,6 +407,40 @@ class SqlResearchRepository:
                     item["sources"].add(source_id)
                 if channel:
                     item["channels"].add(channel)
+        return coverage
+
+    def acquired_evidence_coverage(
+        self, research_id: UUID
+    ) -> dict[UUID, dict[str, set[str]]]:
+        """Return fetched result types and hosts per sub-question."""
+        with self.database.session_factory() as session:
+            rows = session.execute(
+                select(
+                    QueryVariantRow.sub_question_id,
+                    SearchResultRow.result_type,
+                    SearchResultRow.canonical_url,
+                )
+                .join(
+                    QueryResultDiscoveryRow,
+                    QueryResultDiscoveryRow.query_id == QueryVariantRow.id,
+                )
+                .join(SearchResultRow, SearchResultRow.id == QueryResultDiscoveryRow.result_id)
+                .join(ResultDocumentRow, ResultDocumentRow.result_id == SearchResultRow.id)
+                .where(
+                    QueryVariantRow.research_id == str(research_id),
+                    ResultDocumentRow.research_id == str(research_id),
+                )
+                .distinct()
+            ).all()
+        coverage: dict[UUID, dict[str, set[str]]] = {}
+        for sub_question_id, result_type, canonical_url in rows:
+            item = coverage.setdefault(
+                UUID(sub_question_id), {"result_types": set(), "hosts": set()}
+            )
+            item["result_types"].add(result_type)
+            host = (urlsplit(canonical_url).hostname or "").lower()
+            if host:
+                item["hosts"].add(host)
         return coverage
 
     def update_current_round(self, research_id: UUID, round_number: int) -> None:
@@ -456,6 +519,67 @@ class SqlResearchRepository:
             )
             return {"queries": int(query_count or 0), "unique_results": int(result_count or 0)}
 
+    def recent_exact_search_results(
+        self,
+        source_id: str,
+        command: QuickSearchCommand,
+        *,
+        max_age_hours: int = 24,
+    ) -> list[SearchResult]:
+        """Load recent exact-query results only after a live provider failure."""
+        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+        recovery_suffix = " primary source verification"
+        query_candidates = [command.query]
+        if command.query.endswith(recovery_suffix):
+            query_candidates.append(command.query.removesuffix(recovery_suffix))
+        with self.database.session_factory() as session:
+            rows = session.execute(
+                select(SearchResultRow, QueryResultDiscoveryRow.rank)
+                .join(
+                    QueryResultDiscoveryRow,
+                    QueryResultDiscoveryRow.result_id == SearchResultRow.id,
+                )
+                .join(QueryVariantRow, QueryVariantRow.id == QueryResultDiscoveryRow.query_id)
+                .where(
+                    QueryVariantRow.query.in_(query_candidates),
+                    QueryVariantRow.completed_at >= cutoff,
+                    SearchResultRow.source_id == source_id,
+                    *(
+                        (QueryVariantRow.language == command.language,)
+                        if command.language
+                        else ()
+                    ),
+                )
+                .order_by(QueryVariantRow.completed_at.desc(), QueryResultDiscoveryRow.rank)
+            ).all()
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        for row, _rank in rows:
+            if row.canonical_key in seen:
+                continue
+            seen.add(row.canonical_key)
+            results.append(
+                SearchResult(
+                    id=UUID(row.id),
+                    source_id=row.source_id,
+                    adapter_id=row.adapter_id,
+                    channel=Channel(row.channel),
+                    result_type=row.result_type,
+                    title=row.title,
+                    url=row.canonical_url,
+                    original_language=row.original_language,
+                    snippet=row.snippet,
+                    published_at=row.published_at,
+                    retrieved_at=row.retrieved_at,
+                    authors=row.authors,
+                    external_identifiers=row.external_identifiers,
+                    raw_payload=dict(row.raw_payload or {}),
+                )
+            )
+            if len(results) >= command.max_results_per_source:
+                break
+        return results
+
     def result_urls(self, research_id: UUID, limit: int) -> list[str]:
         with self.database.session_factory() as session:
             rows = session.scalars(
@@ -480,12 +604,22 @@ class SqlResearchRepository:
                     )
                 ).all()
             )
-            task = session.get(ResearchTaskRow, str(research_id))
-            queries = session.scalars(
-                select(QueryVariantRow.query).where(QueryVariantRow.research_id == str(research_id))
+            query_rows = session.execute(
+                select(
+                    QueryVariantRow.id,
+                    QueryVariantRow.query,
+                    QueryVariantRow.sub_question_id,
+                ).where(QueryVariantRow.research_id == str(research_id))
             ).all()
-        research_text = " ".join([task.question if task else "", *queries])
-        terms = self._relevance_terms(research_text)
+        query_context = {
+            row.id: {
+                "query": row.query,
+                "sub_question_id": row.sub_question_id,
+                "terms": self._relevance_terms(row.query),
+                "anchors": self._anchor_terms(row.query),
+            }
+            for row in query_rows
+        }
         records = self.result_records(research_id, 10000)
         type_priority = {
             "paper": 0,
@@ -507,17 +641,108 @@ class SqlResearchRepository:
         }
         pending = [record for record in records if record["result_id"] not in acquired]
 
+        for record in pending:
+            contexts = [
+                query_context[item]
+                for item in record["query_ids"]
+                if item in query_context
+            ]
+            scores = [self._query_relevance_score(record, context) for context in contexts]
+            record["relevance_score"] = max(scores, default=0)
+            record["anchor_matches"] = max(
+                (
+                    len(
+                        context["anchors"]
+                        & self._relevance_terms(
+                            f"{record['title']} {record.get('snippet') or ''}"
+                        )
+                    )
+                    for context in contexts
+                ),
+                default=0,
+            )
+            host_labels = set(
+                (urlsplit(record["url"]).hostname or "").lower().split(".")
+            )
+            record["entity_domain_match"] = any(
+                context["anchors"] & host_labels for context in contexts
+            )
+            record["sub_question_ids"] = list(
+                dict.fromkeys(context["sub_question_id"] for context in contexts)
+            )
+
         pending.sort(
             key=lambda record: (
-                -self._relevance_score(record, terms),
+                -int(record["entity_domain_match"]),
+                -int(record["anchor_matches"] > 0),
+                -record["relevance_score"],
                 type_priority.get(record["result_type"], 2),
                 source_priority.get(record["source_id"], 2),
                 record.get("best_rank") or 10000,
             )
         )
-        for record in pending:
-            record["relevance_score"] = self._relevance_score(record, terms)
-        return pending[:limit]
+        eligible = [record for record in pending if record["anchor_matches"] > 0]
+        pool = eligible or pending
+        selected: list[dict] = []
+        selected_ids: set[str] = set()
+        sub_questions = list(
+            dict.fromkeys(
+                context["sub_question_id"] for context in query_context.values()
+            )
+        )
+        for _ in range(2):
+            for sub_question_id in sub_questions:
+                candidate = next(
+                    (
+                        record
+                        for record in pool
+                        if record["result_id"] not in selected_ids
+                        and sub_question_id in record["sub_question_ids"]
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    selected.append(candidate)
+                    selected_ids.add(candidate["result_id"])
+                    if len(selected) >= limit:
+                        return selected
+        selected.extend(record for record in pool if record["result_id"] not in selected_ids)
+        return selected[:limit]
+
+    @classmethod
+    def _query_relevance_score(cls, record: dict, context: dict) -> int:
+        score = cls._relevance_score(record, context["terms"])
+        text = f"{record['title']} {record.get('snippet') or ''}".lower()
+        anchor_matches = {term for term in context["anchors"] if term in text}
+        phrase_bonus = 0
+        query_text = context["query"].lower()
+        for phrase in ("audio watermark", "hidden watermark", "source code"):
+            if phrase in query_text and phrase in text:
+                phrase_bonus += 60
+        return score + len(anchor_matches) * 40 + phrase_bonus
+
+    @staticmethod
+    def _anchor_terms(text: str) -> set[str]:
+        generic = {
+            "audio",
+            "detection",
+            "frequency",
+            "localization",
+            "method",
+            "music",
+            "neural",
+            "official",
+            "open",
+            "project",
+            "source",
+            "temporal",
+            "technology",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z][a-z0-9_.+-]{3,}", text.lower())
+            if token not in generic
+        }
 
     @staticmethod
     def _relevance_score(record: dict, terms: set[str]) -> int:

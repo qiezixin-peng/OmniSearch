@@ -32,6 +32,16 @@ class FakeAdapter(ProviderAdapter):
             yield result
 
 
+class FakeBrowserAdapter(FakeAdapter):
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            source_id=self.source_id,
+            adapter_id=f"{self.source_id}_browser",
+            category=SourceCategory.WEB,
+            channel=Channel.BROWSER,
+        )
+
 def paper(source: str, url: str) -> SearchResult:
     return SearchResult(
         source_id=source,
@@ -168,6 +178,156 @@ async def test_health_reports_recent_circuit_failure() -> None:
     assert health.status == "circuit_open"
     assert health.last_failure_code == "RATE_LIMITED"
     assert health.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_persistent_zero_success_failures_seed_circuit() -> None:
+    class CountedFailureAdapter(FakeAdapter):
+        calls = 0
+
+        async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+            self.calls += 1
+            raise ProviderError("ACCESS_DENIED", "blocked", retryable=True)
+            yield  # pragma: no cover
+
+    adapter = CountedFailureAdapter("google_scholar")
+    service = MultiSourceSearchService([adapter])
+    service.seed_persistent_health(
+        {
+            "sources": [
+                {
+                    "source_id": adapter.capabilities.source_id,
+                    "failed_attempts": 3,
+                    "successes": 0,
+                    "recovered_attempts": 0,
+                }
+            ],
+            "failure_summary": [
+                {
+                    "source_id": adapter.capabilities.source_id,
+                    "code": "ACCESS_DENIED",
+                    "count": 3,
+                }
+            ],
+        }
+    )
+
+    response = await service.search(
+        QuickSearchCommand(query="audio watermark", sources=[adapter.capabilities.source_id])
+    )
+
+    assert response.failures[0].code == "CIRCUIT_OPEN"
+    assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_failure_does_not_open_provider_wide_circuit() -> None:
+    adapter = FakeBrowserAdapter(
+        "google", error=ProviderError("ACCESS_DENIED", "rotating proxy", retryable=True)
+    )
+    calls = 0
+    original_search = adapter.search
+
+    async def counted(request: SearchRequest) -> AsyncIterator[SearchResult]:
+        nonlocal calls
+        calls += 1
+        async for result in original_search(request):
+            yield result
+
+    adapter.search = counted  # type: ignore[method-assign]
+    service = MultiSourceSearchService([adapter])
+
+    first = await service.search(QuickSearchCommand(query="first", sources=["google"]))
+    second = await service.search(QuickSearchCommand(query="second", sources=["google"]))
+
+    assert first.failures[0].code == "ACCESS_DENIED"
+    assert second.failures[0].code == "ACCESS_DENIED"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_persistent_browser_failure_does_not_seed_circuit() -> None:
+    adapter = FakeBrowserAdapter(
+        "google_scholar",
+        error=ProviderError("ACCESS_DENIED", "rotating proxy", retryable=True),
+    )
+    service = MultiSourceSearchService([adapter])
+    service.seed_persistent_health(
+        {
+            "sources": [
+                {
+                    "source_id": "google_scholar",
+                    "failed_attempts": 20,
+                    "successes": 0,
+                    "recovered_attempts": 0,
+                }
+            ]
+        }
+    )
+
+    response = await service.search(
+        QuickSearchCommand(query="audio watermark", sources=["google_scholar"])
+    )
+
+    assert response.failures[0].code == "ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_live_failure_can_recover_exact_query_from_persisted_cache() -> None:
+    adapter = FakeBrowserAdapter(
+        "google", error=ProviderError("ACCESS_DENIED", "blocked route", retryable=True)
+    )
+    cached = paper("google", "https://example.org/cached")
+    cached.channel = Channel.BROWSER
+    service = MultiSourceSearchService(
+        [adapter],
+        stale_fallback_loader=lambda source_id, command: (
+            [cached.model_copy(deep=True)]
+            if source_id == "google" and command.query == "exact query"
+            else []
+        ),
+    )
+
+    response = await service.search(
+        QuickSearchCommand(query="exact query", sources=["google"])
+    )
+
+    assert len(response.results) == 1
+    assert response.failures[0].code == "STALE_CACHE_USED"
+    assert response.results[0].primary.raw_payload["live_failure_code"] == "ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_degraded_browser_uses_persisted_result_before_another_live_timeout() -> None:
+    adapter = FakeBrowserAdapter(
+        "google", error=ProviderError("ACCESS_DENIED", "blocked route", retryable=True)
+    )
+    calls = 0
+    original_search = adapter.search
+
+    async def counted(request: SearchRequest) -> AsyncIterator[SearchResult]:
+        nonlocal calls
+        calls += 1
+        async for result in original_search(request):
+            yield result
+
+    adapter.search = counted  # type: ignore[method-assign]
+    cached = paper("google", "https://example.org/cached")
+    cached.channel = Channel.BROWSER
+    service = MultiSourceSearchService(
+        [adapter],
+        stale_fallback_loader=lambda source_id, command: (
+            [cached.model_copy(deep=True)] if command.query == "repeated" else []
+        ),
+    )
+
+    await service.search(QuickSearchCommand(query="failure one", sources=["google"]))
+    await service.search(QuickSearchCommand(query="failure two", sources=["google"]))
+    response = await service.search(QuickSearchCommand(query="repeated", sources=["google"]))
+
+    assert calls == 2
+    assert response.failures[0].code == "STALE_CACHE_USED"
+    assert len(response.results) == 1
 
 
 @pytest.mark.asyncio

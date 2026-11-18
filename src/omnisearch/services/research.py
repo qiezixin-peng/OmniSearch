@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections import Counter
 from uuid import UUID
 
@@ -7,7 +8,7 @@ from pydantic import Field
 from omnisearch.core.planning import PlannedQuery, ResearchPlan, SearchPlanner
 from omnisearch.core.research import ResearchCoordinator
 from omnisearch.core.research.gaps import GapAnalyzer
-from omnisearch.domain.enums import ResearchStatus
+from omnisearch.domain.enums import ResearchStatus, SourceCategory
 from omnisearch.domain.models import StrictModel
 from omnisearch.services.acquisition import AcquisitionRequest, DocumentAcquisitionService
 from omnisearch.services.search import (
@@ -119,6 +120,8 @@ class ResearchExecutionService:
         else:
             raise ValueError(f"research task cannot execute from status {task.status.value}")
 
+        self._restore_plan_categories(plan)
+
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
         async def execute(query: PlannedQuery) -> tuple[QueryExecution, QuickSearchResponse]:
@@ -205,14 +208,20 @@ class ResearchExecutionService:
         )
         self.repository.update_sub_question_coverage(research_id, covered_sub_questions)
         summary = self.repository.search_summary(research_id)
+        adaptive_page_limit = min(
+            task.budget.max_pages_to_fetch,
+            max(6, len(plan.sub_questions) * 2),
+        )
         documents_acquired, acquisition_failures = await self._acquire_documents(
-            research_id, task.budget.max_pages_to_fetch
+            research_id, adaptive_page_limit
         )
         self._ensure_active(research_id)
         quality_issues = (
             self._quality_issues(
                 plan,
                 evidence_coverage,
+                acquired_coverage=self.repository.acquired_evidence_coverage(research_id),
+                query_coverage=coverage,
                 documents_acquired=documents_acquired,
                 require_documents=task.budget.max_pages_to_fetch > 0,
             )
@@ -253,6 +262,8 @@ class ResearchExecutionService:
                     for (source_id, code), count in sorted(failure_breakdown.items())
                 ],
                 "documents_acquired": documents_acquired,
+                "documents_requested": task.budget.max_pages_to_fetch,
+                "documents_selected": adaptive_page_limit,
                 "acquisition_failures": len(acquisition_failures),
                 "acquisition_failure_details": acquisition_failures[:20],
                 "quality_gate_passed": not quality_issues,
@@ -279,6 +290,8 @@ class ResearchExecutionService:
         plan: ResearchPlan,
         coverage: dict[UUID, dict[str, set[str]]],
         *,
+        acquired_coverage: dict[UUID, dict[str, set[str]]],
+        query_coverage: float,
         documents_acquired: int,
         require_documents: bool,
     ) -> list[str]:
@@ -289,13 +302,75 @@ class ResearchExecutionService:
         for channel in ("api", "browser"):
             if channel not in observed_channels:
                 issues.append(f"missing_channel_evidence:{channel}")
+        if query_coverage < 0.8:
+            issues.append(f"insufficient_query_coverage:{query_coverage:.3f}")
         for sub_question in plan.sub_questions:
-            source_count = len(coverage.get(sub_question.id, {}).get("sources", set()))
+            evidence = coverage.get(sub_question.id, {})
+            source_count = len(evidence.get("sources", set()))
             if source_count < 2:
                 issues.append(f"insufficient_independent_sources:{sub_question.id}:{source_count}")
+            if SourceCategory.CODE in sub_question.categories and not (
+                {"repository", "code"} & evidence.get("result_types", set())
+            ):
+                issues.append(f"missing_code_evidence:{sub_question.id}")
+            acquired = acquired_coverage.get(
+                sub_question.id, {"result_types": set(), "hosts": set()}
+            )
+            if SourceCategory.CODE in sub_question.categories and not (
+                {"repository", "code"} & acquired["result_types"]
+            ):
+                issues.append(f"no_acquired_code_document:{sub_question.id}")
+            entity_tokens = {
+                token.lower()
+                for token in re.findall(
+                    r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_-]{2,})",
+                    sub_question.objective,
+                )
+                if token.lower() not in {"api", "pdf"}
+            }
+            requires_official = any(
+                marker in requirement.lower()
+                for requirement in sub_question.evidence_requirements
+                for marker in ("官方", "一手", "first-party", "primary source")
+            )
+            hosts = evidence.get("hosts", set())
+            if requires_official and entity_tokens and not any(
+                token in host.split(".") for token in entity_tokens for host in hosts
+            ):
+                issues.append(f"missing_official_entity_source:{sub_question.id}")
+            acquired_hosts = acquired["hosts"]
+            if requires_official and entity_tokens and not any(
+                token in host.split(".")
+                for token in entity_tokens
+                for host in acquired_hosts
+            ):
+                issues.append(f"no_acquired_official_document:{sub_question.id}")
+            if require_documents and SourceCategory.ACADEMIC in sub_question.categories:
+                acquired_types = acquired["result_types"]
+                if not any(
+                    result_type == "paper"
+                    or "article" in result_type
+                    or result_type in {"posted-content", "proceedings-article"}
+                    for result_type in acquired_types
+                ):
+                    issues.append(f"no_acquired_academic_document:{sub_question.id}")
         if require_documents and documents_acquired == 0:
             issues.append("no_primary_documents_acquired")
         return issues
+
+    def _restore_plan_categories(self, plan: ResearchPlan) -> None:
+        """Rebuild categories because legacy persisted sub-questions omit them."""
+        queries_by_question: dict = {}
+        for query in plan.queries:
+            queries_by_question.setdefault(query.sub_question_id, []).extend(query.sources)
+        for sub_question in plan.sub_questions:
+            if sub_question.categories:
+                continue
+            for source_id in queries_by_question.get(sub_question.id, []):
+                try:
+                    sub_question.categories.add(self.planner.registry.get(source_id).category)
+                except LookupError:
+                    continue
 
     def _ensure_active(self, research_id: UUID) -> None:
         if self.coordinator.get(research_id).status is ResearchStatus.CANCELLED:
@@ -312,7 +387,16 @@ class ResearchExecutionService:
                 self._ensure_active(research_id)
                 url = candidate["url"]
                 try:
-                    document = await self.acquisition.fetch(AcquisitionRequest(url=url))
+                    timeout_seconds = (
+                        30
+                        if candidate["result_type"] in {"paper", "repository", "patent"}
+                        or "article" in candidate["result_type"]
+                        else 15
+                    )
+                    if url.startswith("http://arxiv.org/"):
+                        url = "https://arxiv.org/" + url.removeprefix("http://arxiv.org/")
+                    async with asyncio.timeout(timeout_seconds):
+                        document = await self.acquisition.fetch(AcquisitionRequest(url=url))
                     self.documents.store(
                         document,
                         research_id=research_id,

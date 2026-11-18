@@ -53,6 +53,22 @@ async def test_google_result_parser() -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_discovery_classifies_repository_url_as_code_evidence() -> None:
+    source = """<a href="https://github.com/facebookresearch/audioseal">
+    <h3>AudioSeal repository</h3></a>"""
+    fetcher = FakeFetcher(source)
+    adapter = GoogleBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].result_type == "repository"
+
+
+@pytest.mark.asyncio
 async def test_duckduckgo_redirect_and_snippet_parser() -> None:
     source = """<html><body><div class="result results_links">
     <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Frepo">
@@ -125,6 +141,31 @@ async def test_duckduckgo_uses_proven_camoufox_backend_as_primary() -> None:
     assert calls == ["camoufox"]
     assert results[0].raw_payload["browser_engine"] == "camoufox"
     assert results[0].raw_payload["fallback_used"] is False
+
+
+def test_duckduckgo_attempts_diversify_endpoint_and_backend_early() -> None:
+    class NamedFetcher(FakeFetcher):
+        def __init__(self, name: str) -> None:
+            super().__init__("")
+            self.backend_name = name
+
+    chrome = NamedFetcher("patchright_chrome")
+    camoufox = NamedFetcher("camoufox")
+    ego = NamedFetcher("ego")
+    adapter = DuckDuckGoBrowserAdapter(
+        chrome_fetcher=chrome,
+        browser_fallback_fetchers=(camoufox,),
+        ego_fetcher=ego,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    attempts = adapter._attempts(search_request())
+
+    assert len(attempts) == 4
+    assert "html.duckduckgo.com" in attempts[0][0]
+    assert "duckduckgo.com/?" in attempts[1][0]
+    assert attempts[0][1] is camoufox
+    assert attempts[1][1] is chrome
 
 
 @pytest.mark.asyncio

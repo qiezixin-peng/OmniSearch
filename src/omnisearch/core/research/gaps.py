@@ -54,6 +54,34 @@ class GapAnalyzer:
             for source in query.sources
             if source in self.source_channels
         }
+        # A failed multilingual variant is not made redundant merely because
+        # another language found results for the same sub-question. Retry it
+        # once in the next round: proxy rotation and alternate browser routes
+        # often recover, and the language may expose unique evidence.
+        for query, response in responses:
+            if len(generated) >= remaining:
+                break
+            if response.results:
+                continue
+            candidate = f"{query.query} primary source verification"
+            if self._normalized(candidate) in used:
+                continue
+            generated.append(
+                PlannedQuery(
+                    sub_question_id=query.sub_question_id,
+                    language=query.language,
+                    query=candidate,
+                    sources=query.sources,
+                    purpose="failed-route recovery after proxy or provider rotation",
+                )
+            )
+            used.add(self._normalized(candidate))
+        # Recovery queries already preserve the affected sub-question,
+        # language and source mix. Do not add a second set of generic gap
+        # queries in the same round; that only duplicates load while the
+        # provider or proxy is recovering.
+        if generated:
+            return generated
         for channel in sorted(planned_channels - observed_channels, key=lambda item: item.value):
             if len(generated) >= remaining:
                 break

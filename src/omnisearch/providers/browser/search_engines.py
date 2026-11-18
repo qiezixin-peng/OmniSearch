@@ -18,7 +18,10 @@ class BrowserSearchAdapter(ProviderAdapter):
     category = SourceCategory.WEB
     result_type = "web_page"
     search_capabilities = {"web"}
-    attempt_timeout_ms = 12_000
+    attempt_timeout_ms = 8_000
+    slow_backend_timeout_ms = 15_000
+    max_attempts: int | None = 4
+    max_concurrency = 2
     wait_after_load_ms = 1_200
     prefer_ego_before_camoufox = False
     preferred_backends: tuple[str, ...] = ()
@@ -51,7 +54,7 @@ class BrowserSearchAdapter(ProviderAdapter):
             supports_pagination=False,
             supports_date_filter=False,
             supports_domain_filter=True,
-            max_concurrency=1,
+            max_concurrency=self.max_concurrency,
             backend="+".join(
                 "ego_browser"
                 if mode is FetchMode.EGO_BROWSER
@@ -68,7 +71,7 @@ class BrowserSearchAdapter(ProviderAdapter):
         for url, fetcher, mode in self._attempts(request):
             try:
                 fetch_timeout_ms = (
-                    30_000
+                    self.slow_backend_timeout_ms
                     if getattr(fetcher, "backend_name", "") == "camoufox"
                     else self.attempt_timeout_ms
                 )
@@ -138,7 +141,7 @@ class BrowserSearchAdapter(ProviderAdapter):
                 source_id=self.source_id,
                 adapter_id=self.adapter_id,
                 channel=Channel.BROWSER,
-                result_type=self.result_type,
+                result_type=self._result_type_for_url(item["url"]),
                 title=item["title"],
                 url=item["url"],
                 original_language=request.language,
@@ -165,11 +168,23 @@ class BrowserSearchAdapter(ProviderAdapter):
         return [self._search_url(request)]
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
-        return [
-            (url, fetcher, mode)
-            for url in self._search_urls(request)
-            for fetcher, mode in self._fetcher_sequence()
-        ]
+        urls = self._search_urls(request)
+        fetchers = self._fetcher_sequence()
+        # Diversify both the endpoint and browser backend early. URL-major
+        # ordering used to spend the entire latency budget retrying one blocked
+        # endpoint and never reached DuckDuckGo's dynamic page or an indexed
+        # community fallback.
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
+        seen: set[tuple[int, int]] = set()
+        for fetcher_index, (fetcher, mode) in enumerate(fetchers):
+            url_index = fetcher_index % len(urls)
+            attempts.append((urls[url_index], fetcher, mode))
+            seen.add((url_index, fetcher_index))
+        for url_index, url in enumerate(urls):
+            for fetcher_index, (fetcher, mode) in enumerate(fetchers):
+                if (url_index, fetcher_index) not in seen:
+                    attempts.append((url, fetcher, mode))
+        return attempts[: self.max_attempts] if self.max_attempts is not None else attempts
 
     def _fetcher_sequence(self) -> list[tuple[ContentFetcher, FetchMode]]:
         candidates = [
@@ -206,6 +221,19 @@ class BrowserSearchAdapter(ProviderAdapter):
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         raise NotImplementedError
+
+    def _result_type_for_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if (
+            host.removeprefix("www.") in {"github.com", "gitlab.com", "codeberg.org"}
+            and len(path_parts) >= 2
+        ):
+            return "repository"
+        if host == "arxiv.org" and path_parts and path_parts[0] in {"abs", "pdf"}:
+            return "paper"
+        return self.result_type
 
     async def _prepare_item(self, item: dict[str, str]) -> dict[str, str] | None:
         return item
@@ -302,6 +330,7 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
         "scrapling_chrome",
         "ego_browser",
     )
+    max_attempts = 4
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -397,13 +426,21 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
     category = SourceCategory.COMMUNITY
     result_type = "post"
     search_capabilities = {"post", "comment", "community"}
+    preferred_backends = (
+        "ego_browser",
+        "patchright_chrome",
+        "scrapling_chrome",
+        "camoufox",
+    )
+    max_attempts = 4
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
         query = quote_plus(request.query)
         indexed = quote_plus(request.query + " site:reddit.com/comments")
         return [
-            f"https://www.reddit.com/search/?q={query}&sort=relevance",
+            f"https://www.google.com/search?q={indexed}&num=20",
             f"https://duckduckgo.com/?q={indexed}&ia=web",
+            f"https://www.reddit.com/search/?q={query}&sort=relevance",
         ]
 
     def _search_url(self, request: SearchRequest) -> str:
@@ -581,6 +618,8 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     )
     managed_browser_proxy_ref = "omnisearch://sticky-proxy"
     stop_on_access_denied = True
+    max_attempts = 3
+    max_concurrency = 1
 
     def _search_url(self, request: SearchRequest) -> str:
         language = (request.language or "en").split("-", 1)[0]
@@ -612,6 +651,7 @@ class GooglePatentsBrowserAdapter(BrowserSearchAdapter):
     result_type = "patent"
     search_capabilities = {"patent", "inventor", "assignee", "citation"}
     prefer_ego_before_camoufox = True
+    max_attempts = 4
 
     def _search_url(self, request: SearchRequest) -> str:
         return (

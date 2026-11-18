@@ -225,7 +225,9 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         cache_ttl_seconds=settings.search_cache_ttl_seconds,
         cache_max_entries=settings.search_cache_max_entries,
         attempt_recorder=provider_telemetry.record,
+        stale_fallback_loader=repository.recent_exact_search_results,
     )
+    search.seed_persistent_health(provider_telemetry.report(hours=1, limit=1))
     model_gateway = None
     if settings.model_base_url and settings.model_name:
         model_gateway = OpenAICompatibleModelGateway(
