@@ -64,8 +64,7 @@ Camoufox仍作为独立内核灾备保留。
 
 默认搜索池已登记 Google、DuckDuckGo、Brave、GitHub、arXiv、Crossref、OpenAlex、
 Semantic Scholar、Google Scholar、Stack Exchange、Reddit、GitLab、CORE、RSSHub 和 Google
-Patents。DDGS 联合搜索适配器也已登记，但因真实连续测试未达到稳定性门槛，默认关闭，
-不会自动进入研究计划。搜索规划器按子问题类别选择多个独立来源，详情见
+Patents。搜索规划器按子问题类别选择多个独立来源，详情见
 [docs/search-pool.md](docs/search-pool.md)。
 
 默认策略不购买搜索额度，也不要求绑定付款方式。需要凭据的 Provider 在未配置时会明确
@@ -139,8 +138,7 @@ Agent 的主运行保障。
 诊断指标严格区分 `primary_success_rate` 与 `effective_completion_rate`。如果 API 或首选浏览器
 失败后由备用引擎救回，该次记为 `recovered` 并仍向 Agent 返回 `FALLBACK_USED`，不会再被
 包装成主路径成功。Google 默认使用 Ego Browser，DuckDuckGo 先使用轻量官方页面并保留
-Ego Browser、托管 Chrome 后备；这些免费网页路径都不承诺外部平台级 SLA。DDGS 当前仅为
-实验 Provider，可通过 `OMNISEARCH_DDGS_ENABLED=true` 显式启用；
+Ego Browser、托管 Chrome 后备；这些免费网页路径都不承诺外部平台级 SLA。
 学术和代码 API 使用按来源串行启动限速，避免并发请求绕过最小间隔。
 
 Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright

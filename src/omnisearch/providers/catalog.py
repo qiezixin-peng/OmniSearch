@@ -140,23 +140,6 @@ def default_sources() -> list[SourceDefinition]:
             ),
         ),
         _source(
-            "ddgs",
-            "DDGS Federated Search (experimental)",
-            web,
-            SourceRole.DISCOVERY,
-            2,
-            _adapter(
-                "ddgs",
-                "ddgs_federated",
-                web,
-                Channel.API,
-                backend="ddgs:startpage+yahoo",
-                capabilities={"web"},
-                domain_filter=True,
-                concurrency=1,
-            ),
-        ),
-        _source(
             "github",
             "GitHub",
             code,
