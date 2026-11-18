@@ -73,6 +73,14 @@ def test_github_long_query_is_shortened_on_a_word_boundary() -> None:
     assert normalized.split()[-1] in {"audio", "watermark"}
 
 
+def test_github_network_retries_fit_outer_service_budget() -> None:
+    adapter = GitHubSearchAdapter()
+
+    assert adapter._timeout == 8.0
+    assert adapter._max_attempts == 2
+    assert adapter._trust_environment_proxy is True
+
+
 @pytest.mark.asyncio
 async def test_arxiv_atom_normalization() -> None:
     atom = """<?xml version="1.0" encoding="UTF-8"?>

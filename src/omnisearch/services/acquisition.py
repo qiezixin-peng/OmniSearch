@@ -88,6 +88,10 @@ class DocumentAcquisitionService:
                         solve_cloudflare=command.solve_cloudflare,
                         network_idle=mode is not FetchMode.HTTP,
                         pierce_shadow=mode is not FetchMode.HTTP,
+                        # Bound each backend independently so a slow HTTP
+                        # response cannot consume the whole acquisition
+                        # budget before browser fallbacks get a chance.
+                        timeout_ms=(12_000 if mode is FetchMode.HTTP else 15_000),
                     )
                 )
                 await validate_public_url(str(fetched.final_url))
@@ -170,6 +174,7 @@ class DocumentAcquisitionService:
                 url=command.url,
                 mode=FetchMode.HTTP,
                 max_bytes=command.max_bytes,
+                timeout_ms=45_000,
             )
         )
         await validate_public_url(str(fetched.final_url))

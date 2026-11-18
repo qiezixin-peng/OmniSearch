@@ -393,12 +393,10 @@ class ResearchExecutionService:
                 self._ensure_active(research_id)
                 url = candidate["url"]
                 try:
-                    timeout_seconds = (
-                        30
-                        if candidate["result_type"] in {"paper", "repository", "patent"}
-                        or "article" in candidate["result_type"]
-                        else 15
-                    )
+                    # Acquisition has a bounded HTTP attempt followed by
+                    # isolated browser fallbacks. The former 15/30 second
+                    # wrapper killed the operation before fallback could run.
+                    timeout_seconds = 65
                     if url.startswith("http://arxiv.org/"):
                         url = "https://arxiv.org/" + url.removeprefix("http://arxiv.org/")
                     async with asyncio.timeout(timeout_seconds):

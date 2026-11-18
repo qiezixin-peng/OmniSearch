@@ -57,6 +57,8 @@ async def test_falls_back_to_full_chrome_when_http_fetch_fails(
     assert result.acquisition_mode == "chrome_managed"
     assert chrome.requests[0].solve_cloudflare is True
     assert chrome.requests[0].pierce_shadow is True
+    assert http.requests[0].timeout_ms == 12_000
+    assert chrome.requests[0].timeout_ms == 15_000
     assert result.metadata["attempts"][0].startswith("http: RuntimeError")
 
 

@@ -94,8 +94,18 @@ class StickyProxyManager:
                     if self._healthy():
                         break
                     time.sleep(0.1)
-                if self._healthy() and self._egress_healthy(force=True):
-                    return
+                if self._healthy():
+                    if self._egress_healthy(force=True):
+                        return
+                    # The selector copied from Clash may point at a node that
+                    # has just gone offline. Select a working alternate while
+                    # the private controller is alive instead of restarting
+                    # the same dead node twice.
+                    try:
+                        self._rotate_unlocked()
+                        return
+                    except StickyProxyUnavailable:
+                        pass
                 self._stop()
             raise StickyProxyUnavailable(
                 "the private Mihomo process has no healthy internet egress"
@@ -108,58 +118,61 @@ class StickyProxyManager:
         del reason  # reserved for future telemetry without leaking query data
         with self._rotation_lock:
             self.ensure()
+            return self._rotate_unlocked()
+
+    def _rotate_unlocked(self) -> str:
+        try:
+            response = httpx.get(
+                f"http://127.0.0.1:{self.controller_port}/proxies",
+                timeout=2.0,
+                trust_env=False,
+            )
+            response.raise_for_status()
+            proxies = response.json().get("proxies", {})
+        except (httpx.HTTPError, ValueError) as error:
+            raise StickyProxyUnavailable("cannot inspect private proxy routes") from error
+        group_name = next(
+            (
+                name
+                for name, item in proxies.items()
+                if item.get("type") == "Selector" and "TAGSS" in name
+            ),
+            None,
+        )
+        if group_name is None:
+            raise StickyProxyUnavailable("private proxy selector was not found")
+        group = proxies[group_name]
+        current = group.get("now")
+        blocked_labels = ("官网", "流量", "剩余", "到期", "重置", "套餐")
+        candidates = [
+            name
+            for name in group.get("all", [])
+            if name != current
+            and not any(label in name for label in blocked_labels)
+            and (proxies.get(name) or {}).get("type")
+            not in {"Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"}
+        ]
+        if not candidates:
+            raise StickyProxyUnavailable("private proxy selector has no alternate nodes")
+        start = self._rotation_cursor % len(candidates)
+        ordered = candidates[start:] + candidates[:start]
+        for offset, candidate in enumerate(ordered[:6], start=1):
             try:
-                response = httpx.get(
-                    f"http://127.0.0.1:{self.controller_port}/proxies",
+                result = httpx.put(
+                    f"http://127.0.0.1:{self.controller_port}/proxies/"
+                    f"{quote(group_name, safe='')}",
+                    json={"name": candidate},
                     timeout=2.0,
                     trust_env=False,
                 )
-                response.raise_for_status()
-                proxies = response.json().get("proxies", {})
-            except (httpx.HTTPError, ValueError) as error:
-                raise StickyProxyUnavailable("cannot inspect private proxy routes") from error
-            group_name = next(
-                (
-                    name
-                    for name, item in proxies.items()
-                    if item.get("type") == "Selector" and "TAGSS" in name
-                ),
-                None,
-            )
-            if group_name is None:
-                raise StickyProxyUnavailable("private proxy selector was not found")
-            group = proxies[group_name]
-            current = group.get("now")
-            blocked_labels = ("官网", "流量", "剩余", "到期", "重置", "套餐")
-            candidates = [
-                name
-                for name in group.get("all", [])
-                if name != current
-                and not any(label in name for label in blocked_labels)
-                and (proxies.get(name) or {}).get("type")
-                not in {"Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"}
-            ]
-            if not candidates:
-                raise StickyProxyUnavailable("private proxy selector has no alternate nodes")
-            start = self._rotation_cursor % len(candidates)
-            ordered = candidates[start:] + candidates[:start]
-            for offset, candidate in enumerate(ordered[:6], start=1):
-                try:
-                    result = httpx.put(
-                        f"http://127.0.0.1:{self.controller_port}/proxies/"
-                        f"{quote(group_name, safe='')}",
-                        json={"name": candidate},
-                        timeout=2.0,
-                        trust_env=False,
-                    )
-                    result.raise_for_status()
-                except httpx.HTTPError:
-                    continue
-                self._last_egress_check = 0.0
-                if self._egress_healthy(force=True, timeout=2.0):
-                    self._rotation_cursor = start + offset
-                    return candidate
-            raise StickyProxyUnavailable("no alternate private proxy node has healthy egress")
+                result.raise_for_status()
+            except httpx.HTTPError:
+                continue
+            self._last_egress_check = 0.0
+            if self._egress_healthy(force=True, timeout=2.0):
+                self._rotation_cursor = start + offset
+                return candidate
+        raise StickyProxyUnavailable("no alternate private proxy node has healthy egress")
 
     def _prepare_runtime(self, source: Path) -> None:
         config = yaml.safe_load(source.read_text(encoding="utf-8"))

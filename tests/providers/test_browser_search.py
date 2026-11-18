@@ -260,6 +260,7 @@ def test_duckduckgo_attempts_diversify_endpoint_and_backend_early() -> None:
     assert attempts[0][1] is ego
     assert attempts[1][1] is chrome
     assert attempts[2][1] is camoufox
+    assert adapter.min_interval_seconds == 5.0
 
 
 @pytest.mark.asyncio

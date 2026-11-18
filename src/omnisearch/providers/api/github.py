@@ -15,7 +15,16 @@ class GitHubSearchAdapter(HttpProvider, ProviderAdapter):
     def __init__(
         self, *, client: httpx.AsyncClient | None = None, token: str | None = None
     ) -> None:
-        super().__init__(client=client, user_agent="OmniSearch/0.1 GitHub research client")
+        # Two bounded attempts fit inside SearchService's 20 second API
+        # budget. Respect the user's automatically changing Windows proxy;
+        # direct GitHub routing is not consistently reachable on every node.
+        super().__init__(
+            client=client,
+            user_agent="OmniSearch/0.1 GitHub research client",
+            timeout_seconds=8.0,
+            trust_environment_proxy=True,
+            max_attempts=2,
+        )
         self.token = token
 
     @property

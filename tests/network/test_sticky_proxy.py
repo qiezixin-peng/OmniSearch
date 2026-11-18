@@ -40,3 +40,31 @@ def test_prepare_runtime_creates_isolated_loopback_config(tmp_path: Path) -> Non
     assert generated["tun"]["enable"] is False
     assert generated["dns"]["listen"] == "127.0.0.1:17853"
     assert "external-controller-pipe" not in generated
+
+
+def test_ensure_rotates_away_from_dead_initial_route(tmp_path: Path, monkeypatch) -> None:
+    clash = tmp_path / "clash"
+    clash.mkdir()
+    (clash / "clash-verge.yaml").write_text("proxies: []\n", encoding="utf-8")
+    executable = tmp_path / "mihomo.exe"
+    executable.touch()
+    manager = StickyProxyManager(
+        runtime_dir=tmp_path / "runtime",
+        clash_config_dir=clash,
+        mihomo_executable=executable,
+    )
+    rotations: list[bool] = []
+    monkeypatch.setattr(manager, "_healthy", lambda: True)
+    monkeypatch.setattr(manager, "_egress_healthy", lambda **_kwargs: False)
+    monkeypatch.setattr(manager, "_stop", lambda: None)
+    monkeypatch.setattr(manager, "_prepare_runtime", lambda _source: None)
+    monkeypatch.setattr(manager, "_start", lambda: None)
+    monkeypatch.setattr(
+        manager,
+        "_rotate_unlocked",
+        lambda: rotations.append(True) or "working-node",
+    )
+
+    manager.ensure()
+
+    assert rotations == [True]

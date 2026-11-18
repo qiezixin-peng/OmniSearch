@@ -390,6 +390,10 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
         "camoufox",
     )
     max_attempts = 3
+    # DuckDuckGo aggressively challenges bursts even when each request is
+    # serialized. Space query starts so a multilingual research batch does
+    # not turn into a self-inflicted temporary ban.
+    min_interval_seconds = 5.0
     attempt_timeout_ms = 12_000
     wait_after_load_ms = 2_000
     wait_selector = '[data-testid="result-title-a"], a.result__a'
