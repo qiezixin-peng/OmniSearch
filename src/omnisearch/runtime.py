@@ -11,6 +11,7 @@ from omnisearch.fetchers import (
     ScraplingFetcher,
 )
 from omnisearch.models import OpenAICompatibleModelGateway
+from omnisearch.network import StickyProxyManager
 from omnisearch.observability import configure_observability
 from omnisearch.providers.api import (
     ArxivAdapter,
@@ -105,16 +106,29 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     documents = DocumentRepository(database, object_store=object_store)
     coordinator = ResearchCoordinator(repository)
     sources = build_default_registry()
-    scrapling = ScraplingFetcher()
+    sticky_proxy = StickyProxyManager(
+        runtime_dir=settings.runtime_dir,
+        clash_config_dir=settings.clash_verge_config_dir,
+        mihomo_executable=settings.mihomo_executable,
+        proxy_port=settings.sticky_proxy_port,
+        controller_port=settings.sticky_proxy_controller_port,
+        enabled=settings.sticky_proxy_enabled,
+    )
+    scrapling = ScraplingFetcher(secret_resolver=sticky_proxy.resolve)
     patchright = PatchrightFetcher(
         channel=settings.patchright_channel,
         headless=settings.browser_headless,
+        secret_resolver=sticky_proxy.resolve,
     )
     browser_fallbacks = [scrapling]
     camoufox_python = settings.camoufox_python.expanduser().resolve()
     if settings.camoufox_enabled and camoufox_python.is_file():
         browser_fallbacks.append(
-            CamoufoxFetcher(camoufox_python, headless=settings.browser_headless)
+            CamoufoxFetcher(
+                camoufox_python,
+                headless=settings.browser_headless,
+                secret_resolver=sticky_proxy.resolve,
+            )
         )
     browser_fallback_tuple = tuple(browser_fallbacks)
     safe_http = SafeHttpFetcher()

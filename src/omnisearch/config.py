@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     patchright_channel: str = "chrome"
     camoufox_enabled: bool = True
     camoufox_python: Path = Path(".venv-camoufox312/Scripts/python.exe")
+    sticky_proxy_enabled: bool = True
+    sticky_proxy_port: int = Field(default=17897, ge=1024, le=65535)
+    sticky_proxy_controller_port: int = Field(default=19097, ge=1024, le=65535)
+    clash_verge_config_dir: Path = Path(
+        "~/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev"
+    )
+    mihomo_executable: Path = Path("C:/Program Files/Clash Verge/verge-mihomo.exe")
     search_api_timeout_seconds: float = Field(default=20.0, gt=0)
     search_browser_timeout_seconds: float = Field(default=60.0, gt=0)
     search_cache_ttl_seconds: float = Field(default=900.0, ge=0)

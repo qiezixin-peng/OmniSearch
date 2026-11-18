@@ -27,8 +27,8 @@ REST、MCP 或 CLI 自动调用 OmniSearch，并取得可追溯的资料和证�
 
 - 研究任务、子问题、依赖、查询、搜索计划、结果和事件的数据契约；
 - 可审计的研究任务状态机；
-- Google、DuckDuckGo、Google Scholar 的 Patchright Chrome → Scrapling → Camoufox
-  → ego-browser 自动降级链；
+- Google、DuckDuckGo、Google Scholar 的 Patchright Chrome、Scrapling、Camoufox 与
+  ego-browser 自动降级链；Google 系列的托管浏览器回退使用独立的粘性代理会话；
 - GitHub、arXiv、Crossref、OpenAlex、Semantic Scholar、Stack Exchange、GitLab、Reddit、
   CORE、Brave 的真实 API Adapter（需要密钥的来源会明确报告 `NOT_CONFIGURED`）；
 - X（API 或授权浏览器）、Bluesky、Hacker News、Hugging Face、Europe PMC、RSSHub、
@@ -48,6 +48,11 @@ REST、MCP 或 CLI 自动调用 OmniSearch，并取得可追溯的资料和证�
   自动接管；
 - **ego-browser**：登录态、用户授权会话和需要交互的复杂网页；
 - **OmniSearch**：统一策略、任务、预算、证据、审计以及对 Agent 的工具接口。
+
+Windows 上若 Clash Verge 使用自动测速切换节点，OmniSearch 会从其合并配置与当前选择
+创建仅监听回环地址的独立 Mihomo 会话。全局代理仍可继续自动切换，而单次 Google 浏览器
+会话的出口不会在中途改变。该机制不会规避 Google 的访问限制；出口本身被 Scholar 拒绝时，
+系统仍会记录该路径失败并由其他学术来源补充覆盖。
 
 每种浏览器使用独立配置目录，不共享日常 Chrome Cookie。实际命中的引擎会写入结果
 `browser_engine`，便于健康统计和回归。完整决策见

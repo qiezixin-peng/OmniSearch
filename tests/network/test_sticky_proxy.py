@@ -1,0 +1,42 @@
+from pathlib import Path
+
+import yaml
+
+from omnisearch.network.sticky_proxy import StickyProxyManager
+
+
+def test_prepare_runtime_creates_isolated_loopback_config(tmp_path: Path) -> None:
+    clash = tmp_path / "clash"
+    clash.mkdir()
+    (clash / "clash-verge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "mixed-port": 7897,
+                "external-controller-pipe": r"\\.\pipe\mihomo",
+                "allow-lan": True,
+                "tun": {"enable": True},
+                "dns": {"enable": True, "listen": "0.0.0.0:7874"},
+                "proxies": [{"name": "node", "type": "direct"}],
+                "proxy-groups": [{"name": "Proxy", "type": "select", "proxies": ["node"]}],
+                "rules": ["MATCH,Proxy"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = StickyProxyManager(
+        runtime_dir=tmp_path / "runtime",
+        clash_config_dir=clash,
+        mihomo_executable=tmp_path / "mihomo.exe",
+    )
+
+    manager.runtime_dir.mkdir(parents=True)
+    manager._prepare_runtime(clash / "clash-verge.yaml")
+
+    generated = yaml.safe_load((manager.runtime_dir / "config.yaml").read_text(encoding="utf-8"))
+    assert generated["mixed-port"] == 17897
+    assert generated["external-controller"] == "127.0.0.1:19097"
+    assert generated["bind-address"] == "127.0.0.1"
+    assert generated["allow-lan"] is False
+    assert generated["tun"]["enable"] is False
+    assert generated["dns"]["listen"] == "127.0.0.1:17853"
+    assert "external-controller-pipe" not in generated

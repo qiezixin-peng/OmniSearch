@@ -48,6 +48,10 @@ class FetchRequest(StrictModel):
     record_requests: bool = False
     max_recorded_requests: int = Field(default=200, ge=1, le=5000)
     proxy_secret_ref: str | None = Field(default=None, max_length=500)
+    # Ignore the Windows/system proxy for a dedicated browser session. This is
+    # useful for origins that bind a session to one egress IP while the user's
+    # global proxy group is allowed to switch nodes automatically.
+    bypass_system_proxy: bool = False
 
     @model_validator(mode="after")
     def validate_mode_settings(self) -> "FetchRequest":

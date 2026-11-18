@@ -23,6 +23,8 @@ class BrowserSearchAdapter(ProviderAdapter):
     prefer_ego_before_camoufox = False
     preferred_backends: tuple[str, ...] = ()
     stop_on_access_denied = False
+    managed_browser_bypass_system_proxy = False
+    managed_browser_proxy_ref: str | None = None
 
     def __init__(
         self,
@@ -86,6 +88,15 @@ class BrowserSearchAdapter(ProviderAdapter):
                             network_idle=False,
                             wait_after_load_ms=self.wait_after_load_ms,
                             main_content_only=False,
+                            bypass_system_proxy=(
+                                self.managed_browser_bypass_system_proxy
+                                and mode is FetchMode.CHROME_MANAGED
+                            ),
+                            proxy_secret_ref=(
+                                self.managed_browser_proxy_ref
+                                if mode is FetchMode.CHROME_MANAGED
+                                else None
+                            ),
                         )
                     )
                 if document.raw_html:
@@ -238,6 +249,9 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
         "scrapling_chrome",
         "camoufox",
     )
+    # Keep Ego on the user's automatically selected proxy, but make managed
+    # browser fallbacks independent of node changes.
+    managed_browser_proxy_ref = "omnisearch://sticky-proxy"
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -560,11 +574,12 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     access_denied_cooldown_seconds = 21_600.0
     prefer_ego_before_camoufox = True
     preferred_backends = (
-        "ego_browser",
         "patchright_chrome",
+        "ego_browser",
         "scrapling_chrome",
         "camoufox",
     )
+    managed_browser_proxy_ref = "omnisearch://sticky-proxy"
     stop_on_access_denied = True
 
     def _search_url(self, request: SearchRequest) -> str:

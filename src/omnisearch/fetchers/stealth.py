@@ -62,6 +62,7 @@ class PatchrightFetcher(ContentFetcher):
                 "channel": self.channel,
                 "headless": self.headless,
                 "proxy_used": request.proxy_secret_ref is not None,
+                "system_proxy_bypassed": request.bypass_system_proxy,
             },
         )
 
@@ -82,6 +83,15 @@ class PatchrightFetcher(ContentFetcher):
             "channel": self.channel,
             "headless": self.headless,
         }
+        if request.bypass_system_proxy:
+            # Chromium otherwise inherits the Windows proxy configuration. A
+            # latency-selected proxy group may change exit nodes between
+            # requests, which Google treats as a suspicious session change.
+            options["args"] = [
+                "--no-proxy-server",
+                "--proxy-bypass-list=*",
+                "--disable-quic",
+            ]
         if request.locale:
             options["locale"] = request.locale
         if proxy:

@@ -43,6 +43,25 @@ class FakeContext:
     pages = [FakePage()]
 
 
+class FakeChromium:
+    def __init__(self) -> None:
+        self.options = None
+
+    async def launch_persistent_context(self, **options):
+        self.options = options
+        return ClosableFakeContext()
+
+
+class ClosableFakeContext(FakeContext):
+    async def close(self):
+        return None
+
+
+class FakePlaywright:
+    def __init__(self) -> None:
+        self.chromium = FakeChromium()
+
+
 @pytest.mark.asyncio
 async def test_patchright_fetcher_returns_normalized_document(tmp_path, monkeypatch) -> None:
     fetcher = PatchrightFetcher(channel="chrome", headless=True)
@@ -77,3 +96,42 @@ async def test_camoufox_reports_missing_isolated_runtime(tmp_path) -> None:
                 chrome_user_data_dir=str(tmp_path / "profile"),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_patchright_can_bypass_rotating_system_proxy(tmp_path, monkeypatch) -> None:
+    fetcher = PatchrightFetcher(channel="chrome", headless=True)
+    playwright = FakePlaywright()
+
+    class FakeManager:
+        async def __aenter__(self):
+            return playwright
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakePatchrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakeManager()
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "patchright.async_api",
+        FakePatchrightModule(),
+    )
+    request = FetchRequest(
+        url="https://scholar.google.com",
+        mode=FetchMode.CHROME_MANAGED,
+        chrome_user_data_dir=str(tmp_path / "profile"),
+        bypass_system_proxy=True,
+    )
+
+    async with fetcher._context(request, tmp_path / "profile", None):
+        pass
+
+    assert playwright.chromium.options["args"] == [
+        "--no-proxy-server",
+        "--proxy-bypass-list=*",
+        "--disable-quic",
+    ]

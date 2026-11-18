@@ -379,6 +379,21 @@ function Stop-Services {
     foreach ($Service in Get-ServiceDefinitions) {
         Stop-ServiceProcess $Service
     }
+    $StickyPidPath = Join-Path $RuntimeRoot "sticky-proxy\mihomo.pid"
+    if (Test-Path -LiteralPath $StickyPidPath) {
+        try {
+            $StickyPid = [int](Get-Content -LiteralPath $StickyPidPath -Raw)
+            $StickyProcess = Get-Process -Id $StickyPid -ErrorAction SilentlyContinue
+            if ($null -ne $StickyProcess -and
+                $StickyProcess.ProcessName -like "verge-mihomo*") {
+                Stop-Process -Id $StickyPid -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id $StickyPid -Timeout 5 -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $StickyPidPath -Force -ErrorAction SilentlyContinue
+        }
+    }
     if (-not $Quiet) {
         Write-Output "OmniSearch Windows native runtime stopped."
     }
