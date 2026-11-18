@@ -398,22 +398,19 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
-        return f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        return f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
         encoded = quote_plus(query)
         return [
-            f"https://html.duckduckgo.com/html/?q={encoded}",
+            f"https://lite.duckduckgo.com/lite/?q={encoded}",
             f"https://duckduckgo.com/?q={encoded}&ia=web",
         ]
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
         html_url, dynamic_url = self._search_urls(request)
-        attempts: list[tuple[str, ContentFetcher, FetchMode]] = [
-            (dynamic_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
-            (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
-        ]
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
         scrapling = next(
             (
                 fetcher
@@ -423,8 +420,17 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
             None,
         )
         if scrapling is not None:
+            # The lightweight official endpoint is materially faster and less
+            # challenge-prone than the JavaScript search page. Keep real
+            # browsers as independent fallbacks for coverage.
             attempts.append((html_url, scrapling, FetchMode.HTTP))
-        else:
+        attempts.extend(
+            [
+                (dynamic_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+                (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+            ]
+        )
+        if scrapling is None:
             fallback = next(
                 (
                     fetcher
@@ -440,7 +446,9 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
         records: list[dict[str, str]] = []
-        anchors = tree.cssselect('[data-testid="result-title-a"], a.result__a')
+        anchors = tree.cssselect(
+            '[data-testid="result-title-a"], a.result__a, a.result-link'
+        )
         for anchor in anchors:
             href = anchor.get("href", "")
             if "uddg=" in href:

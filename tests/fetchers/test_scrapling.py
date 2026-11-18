@@ -107,3 +107,31 @@ async def test_proxy_credentials_are_resolved_outside_task_payload(tmp_path) -> 
         )
     )
     assert captured["proxy"]["username"] == "vault://proxy/research"
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_dictionary_is_normalized_for_curl_engine() -> None:
+    captured = {}
+
+    async def fake_get(url: str, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(headers={})
+
+    fetcher = ScraplingFetcher(
+        http_fetch=fake_get,
+        secret_resolver=lambda _ref: {
+            "server": "http://127.0.0.1:17897",
+            "username": "agent",
+            "password": "secret",
+        },
+    )
+    await fetcher.fetch(
+        FetchRequest(
+            url="https://example.com",
+            mode=FetchMode.HTTP,
+            proxy_secret_ref="omnisearch://sticky-proxy",
+        )
+    )
+
+    assert captured["proxy"] == "http://127.0.0.1:17897"
+    assert captured["proxy_auth"] == ("agent", "secret")

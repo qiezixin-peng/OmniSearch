@@ -159,8 +159,26 @@ async def test_duckduckgo_redirect_and_snippet_parser() -> None:
     assert str(results[0].url) == "https://example.org/repo"
     assert results[0].snippet == "Implementation details"
     assert adapter._search_urls(search_request())[0].startswith(
-        "https://html.duckduckgo.com/html/"
+        "https://lite.duckduckgo.com/lite/"
     )
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_lite_result_parser() -> None:
+    source = """<html><body><a class="result-link"
+    href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fpaper">
+    Useful Paper</a></body></html>"""
+    fetcher = FakeFetcher(source)
+    adapter = DuckDuckGoBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = [item async for item in adapter.search(search_request())]
+
+    assert results[0].title == "Useful Paper"
+    assert str(results[0].url) == "https://example.org/paper"
 
 
 @pytest.mark.asyncio

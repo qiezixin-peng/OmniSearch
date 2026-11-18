@@ -35,7 +35,7 @@ class ScraplingFetcher(ContentFetcher):
             response = await self._get_http_fetch()(
                 str(request.url),
                 timeout=request.timeout_ms,
-                proxy=proxy,
+                **self._http_proxy_options(proxy),
                 impersonate="chrome",
                 retries=request.retries,
                 retry_delay=max(0, request.retry_delay_ms // 1000),
@@ -65,6 +65,21 @@ class ScraplingFetcher(ContentFetcher):
         else:
             raise FetchPolicyError("ego-browser requests must use the dedicated ego adapter")
         return self._to_document(request, response)
+
+    @staticmethod
+    def _http_proxy_options(proxy: Any) -> dict[str, Any]:
+        """Translate Playwright proxy dictionaries for Scrapling's HTTP engine."""
+        if not isinstance(proxy, dict):
+            return {"proxy": proxy}
+        server = proxy.get("server")
+        if not isinstance(server, str) or not server:
+            raise FetchPolicyError("a resolved HTTP proxy requires a server URL")
+        options: dict[str, Any] = {"proxy": server}
+        username = proxy.get("username")
+        password = proxy.get("password")
+        if username is not None or password is not None:
+            options["proxy_auth"] = (str(username or ""), str(password or ""))
+        return options
 
     @staticmethod
     def _browser_options(request: FetchRequest, proxy: Any) -> dict[str, Any]:
