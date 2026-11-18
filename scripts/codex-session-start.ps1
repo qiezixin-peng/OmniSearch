@@ -5,7 +5,9 @@ try {
     # Run in the existing Hook host. Starting a nested powershell.exe can flash
     # a console window even when the parent Agent application has no console.
     $Output = & $Supervisor Ensure -Quiet 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # A directly invoked PowerShell script does not reliably populate
+    # $LASTEXITCODE. $? is the authoritative success signal for this path.
+    if (-not $?) {
         throw ($Output -join [Environment]::NewLine)
     }
 }
