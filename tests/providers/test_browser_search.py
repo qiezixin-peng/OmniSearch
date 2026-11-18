@@ -1,9 +1,11 @@
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from omnisearch.domain.models import SearchRequest
 from omnisearch.fetchers import ContentFetcher, FetchedDocument
+from omnisearch.providers.api import OpenAlexAdapter
 from omnisearch.providers.base import ProviderError
 from omnisearch.providers.browser import (
     BraveBrowserAdapter,
@@ -106,7 +108,7 @@ async def test_browser_search_falls_back_to_ego() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duckduckgo_uses_proven_camoufox_backend_as_primary() -> None:
+async def test_duckduckgo_reaches_camoufox_after_lighter_backends_fail() -> None:
     calls: list[str] = []
 
     class BrokenFetcher(ContentFetcher):
@@ -123,9 +125,10 @@ async def test_duckduckgo_uses_proven_camoufox_backend_as_primary() -> None:
             document.metadata["engine"] = self.backend_name
             return document
 
-    class ForbiddenEgo(ContentFetcher):
+    class BrokenEgo(ContentFetcher):
         async def fetch(self, request):
-            raise AssertionError("ego should not be reached")
+            calls.append("ego")
+            raise RuntimeError("Ego unavailable")
 
     fallback = CamoufoxFake(
         '<a href="https://example.org" class="result__a">Fallback result</a>'
@@ -133,14 +136,14 @@ async def test_duckduckgo_uses_proven_camoufox_backend_as_primary() -> None:
     adapter = DuckDuckGoBrowserAdapter(
         chrome_fetcher=BrokenFetcher(),
         browser_fallback_fetchers=(fallback,),
-        ego_fetcher=ForbiddenEgo(),
+        ego_fetcher=BrokenEgo(),
         chrome_user_data_dir="C:/dedicated",
     )
     results = [item async for item in adapter.search(search_request())]
 
-    assert calls == ["camoufox"]
+    assert calls == ["ego", "patchright", "camoufox"]
     assert results[0].raw_payload["browser_engine"] == "camoufox"
-    assert results[0].raw_payload["fallback_used"] is False
+    assert results[0].raw_payload["fallback_used"] is True
 
 
 def test_duckduckgo_attempts_diversify_endpoint_and_backend_early() -> None:
@@ -161,11 +164,11 @@ def test_duckduckgo_attempts_diversify_endpoint_and_backend_early() -> None:
 
     attempts = adapter._attempts(search_request())
 
-    assert len(attempts) == 4
-    assert "html.duckduckgo.com" in attempts[0][0]
-    assert "duckduckgo.com/?" in attempts[1][0]
-    assert attempts[0][1] is camoufox
+    assert len(attempts) == 3
+    assert "duckduckgo.com/?" in attempts[0][0]
+    assert attempts[0][1] is ego
     assert attempts[1][1] is chrome
+    assert attempts[2][1] is camoufox
 
 
 @pytest.mark.asyncio
@@ -185,6 +188,64 @@ async def test_google_scholar_parser_preserves_paper_snippet() -> None:
 
     assert results[0].result_type == "paper"
     assert results[0].snippet == "A robust detection and localization method."
+
+
+@pytest.mark.asyncio
+async def test_google_scholar_cools_off_official_probe_but_keeps_live_index() -> None:
+    class ChallengeFetcher(FakeFetcher):
+        calls = 0
+
+        async def fetch(self, request):
+            self.calls += 1
+            return await super().fetch(request)
+
+    async def index_handler(incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "https://openalex.org/W1",
+                        "display_name": "Audio Watermarking",
+                        "type": "article",
+                        "doi": "https://doi.org/10.1000/example",
+                        "authorships": [],
+                    }
+                ]
+            },
+        )
+
+    challenge = ChallengeFetcher("<div class='g-recaptcha'>challenge</div>")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(index_handler)) as client:
+        adapter = GoogleScholarBrowserAdapter(
+            chrome_fetcher=challenge,
+            ego_fetcher=challenge,
+            chrome_user_data_dir="C:/dedicated",
+            index_fallback=OpenAlexAdapter(client=client),
+        )
+        first = [item async for item in adapter.search(search_request())]
+        second = [item async for item in adapter.search(search_request())]
+
+    assert challenge.calls == 2
+    assert first[0].raw_payload["fallback_path"] == "openalex_live_academic_index"
+    assert second[0].raw_payload["fallback_path"] == "openalex_live_academic_index"
+
+
+def test_google_patents_parser_accepts_scrapling_wrapped_xhr_json() -> None:
+    source = """<html><body><p>{"results":{"cluster":[{"result":[{
+      "id":"patent/US123B2/en","patent":{"title":" <b>Audio watermark</b>",
+      "snippet":"Robust <b>localization</b> method"}}]}]}}</p></body></html>"""
+    fetcher = FakeFetcher("")
+    adapter = GooglePatentsBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+    )
+
+    results = adapter._parse(source)
+
+    assert results[0]["title"] == "Audio watermark"
+    assert results[0]["external_id"] == "US123B2"
 
 
 @pytest.mark.asyncio
@@ -412,4 +473,4 @@ async def test_browser_challenge_is_reported_as_access_denied() -> None:
         _ = [item async for item in adapter.search(search_request())]
 
     assert raised.value.code == "ACCESS_DENIED"
-    assert fetcher.calls == 1
+    assert fetcher.calls == 2

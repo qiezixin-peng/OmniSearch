@@ -7,10 +7,16 @@ from urllib.robotparser import RobotFileParser
 from pydantic import Field, HttpUrl
 
 from omnisearch.domain.models import StrictModel
-from omnisearch.extractors import extract_html, extract_links, extract_pdf
 from omnisearch.fetchers import ContentFetcher, FetchMode, FetchPolicyError, FetchRequest
 from omnisearch.observability import documents_fetched, tracer
 from omnisearch.security import UnsafeUrlError, validate_public_url
+
+
+def extract_pdf(content: bytes):
+    """Lazy compatibility boundary so service startup does not import PyMuPDF."""
+    from omnisearch.extractors.pdf import extract_pdf as parse_pdf
+
+    return parse_pdf(content)
 
 
 class AcquisitionRequest(StrictModel):
@@ -91,6 +97,10 @@ class DocumentAcquisitionService:
                     fetched.content_type, fetched.raw_bytes
                 ):
                     return self._acquired_pdf(command, fetched, attempts)
+                # HTML parsing pulls in lxml/trafilatura. Keep it out of API, MCP and
+                # worker startup until a document really needs to be extracted.
+                from omnisearch.extractors.html import extract_html, extract_links
+
                 text, metadata = extract_html(
                     fetched.raw_html or "", fetched.markdown
                 ) if fetched.raw_html else (fetched.markdown.strip(), {})

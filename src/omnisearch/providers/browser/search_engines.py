@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
 
@@ -18,11 +19,15 @@ class BrowserSearchAdapter(ProviderAdapter):
     category = SourceCategory.WEB
     result_type = "web_page"
     search_capabilities = {"web"}
-    attempt_timeout_ms = 8_000
-    slow_backend_timeout_ms = 15_000
+    attempt_timeout_ms = 15_000
+    slow_backend_timeout_ms = 20_000
     max_attempts: int | None = 4
-    max_concurrency = 2
+    # Every adapter uses one persistent profile per source. Concurrent launches
+    # against the same directory corrupt the session and close each other's
+    # browser contexts, so parallelism belongs across sources, not within one.
+    max_concurrency = 1
     wait_after_load_ms = 1_200
+    wait_selector: str | None = None
     prefer_ego_before_camoufox = False
     preferred_backends: tuple[str, ...] = ()
     stop_on_access_denied = False
@@ -36,11 +41,13 @@ class BrowserSearchAdapter(ProviderAdapter):
         ego_fetcher: ContentFetcher,
         chrome_user_data_dir: str,
         browser_fallback_fetchers: tuple[ContentFetcher, ...] = (),
+        route_rotator: Callable[[str], str | None] | None = None,
     ) -> None:
         self.chrome_fetcher = chrome_fetcher
         self.browser_fetchers = (chrome_fetcher, *browser_fallback_fetchers)
         self.ego_fetcher = ego_fetcher
         self.chrome_user_data_dir = str(Path(chrome_user_data_dir) / self.source_id)
+        self.route_rotator = route_rotator
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -86,9 +93,12 @@ class BrowserSearchAdapter(ProviderAdapter):
                                 if mode is FetchMode.CHROME_MANAGED
                                 else None
                             ),
-                            ego_task_name=f"OmniSearch {self.source_id} search",
+                            ego_task_name=(
+                                f"OmniSearch {self.source_id} {request.query_id}"
+                            ),
                             solve_cloudflare=True,
                             network_idle=False,
+                            wait_selector=self.wait_selector,
                             wait_after_load_ms=self.wait_after_load_ms,
                             main_content_only=False,
                             bypass_system_proxy=(
@@ -97,7 +107,7 @@ class BrowserSearchAdapter(ProviderAdapter):
                             ),
                             proxy_secret_ref=(
                                 self.managed_browser_proxy_ref
-                                if mode is FetchMode.CHROME_MANAGED
+                                if mode in {FetchMode.CHROME_MANAGED, FetchMode.HTTP}
                                 else None
                             ),
                         )
@@ -106,6 +116,11 @@ class BrowserSearchAdapter(ProviderAdapter):
                     if self._is_access_denied(document):
                         access_denied = True
                         failures.append(f"{mode.value} {url}: access challenge or rate limit")
+                        if mode is not FetchMode.EGO_BROWSER and self.route_rotator:
+                            try:
+                                self.route_rotator(f"{self.source_id}:access_denied")
+                            except Exception as error:
+                                failures.append(f"proxy rotation failed: {error}")
                         if self.stop_on_access_denied:
                             break
                         continue
@@ -261,6 +276,9 @@ class BrowserSearchAdapter(ProviderAdapter):
             "g-recaptcha",
             "recaptcha/api",
             "cf-chl-",
+            "anomaly-modal",
+            "unfortunately, bots use duckduckgo too",
+            "error-lite+",
         )
         return any(marker in source for marker in markers)
 
@@ -285,6 +303,11 @@ class GoogleBrowserAdapter(BrowserSearchAdapter):
         query = request.query + (f" site:{request.domain}" if request.domain else "")
         language = (request.language or "en").split("-", 1)[0]
         return f"https://www.google.com/search?q={quote_plus(query)}&hl={language}&num=20"
+
+    def _search_urls(self, request: SearchRequest) -> list[str]:
+        primary = self._search_url(request)
+        separator = "&" if "?" in primary else "?"
+        return [primary, f"{primary}{separator}udm=14&filter=0"]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
@@ -325,12 +348,17 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
     source_id = "duckduckgo"
     adapter_id = "duckduckgo_chrome"
     preferred_backends = (
-        "camoufox",
-        "patchright_chrome",
         "scrapling_chrome",
+        "patchright_chrome",
         "ego_browser",
+        "camoufox",
     )
-    max_attempts = 4
+    max_attempts = 3
+    attempt_timeout_ms = 12_000
+    wait_after_load_ms = 2_000
+    wait_selector = '[data-testid="result-title-a"], a.result__a'
+    managed_browser_proxy_ref = "omnisearch://sticky-proxy"
+    managed_browser_bypass_system_proxy = True
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -343,6 +371,35 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
             f"https://html.duckduckgo.com/html/?q={encoded}",
             f"https://duckduckgo.com/?q={encoded}&ia=web",
         ]
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        html_url, dynamic_url = self._search_urls(request)
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = [
+            (dynamic_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
+            (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
+        ]
+        scrapling = next(
+            (
+                fetcher
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") == "scrapling_chrome"
+            ),
+            None,
+        )
+        if scrapling is not None:
+            attempts.append((html_url, scrapling, FetchMode.HTTP))
+        else:
+            fallback = next(
+                (
+                    fetcher
+                    for fetcher in self.browser_fetchers
+                    if fetcher is not self.chrome_fetcher
+                ),
+                None,
+            )
+            if fallback is not None:
+                attempts.append((dynamic_url, fallback, FetchMode.CHROME_MANAGED))
+        return attempts[: self.max_attempts]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
@@ -427,9 +484,9 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
     result_type = "post"
     search_capabilities = {"post", "comment", "community"}
     preferred_backends = (
-        "ego_browser",
-        "patchright_chrome",
         "scrapling_chrome",
+        "patchright_chrome",
+        "ego_browser",
         "camoufox",
     )
     max_attempts = 4
@@ -439,9 +496,24 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
         indexed = quote_plus(request.query + " site:reddit.com/comments")
         return [
             f"https://www.google.com/search?q={indexed}&num=20",
-            f"https://duckduckgo.com/?q={indexed}&ia=web",
+            f"https://html.duckduckgo.com/html/?q={indexed}",
             f"https://www.reddit.com/search/?q={query}&sort=relevance",
         ]
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
+        scrapling = next(
+            (
+                fetcher
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") == "scrapling_chrome"
+            ),
+            None,
+        )
+        if scrapling is not None:
+            attempts.append((self._search_urls(request)[1], scrapling, FetchMode.HTTP))
+        attempts.extend(super()._attempts(request))
+        return attempts[: self.max_attempts]
 
     def _search_url(self, request: SearchRequest) -> str:
         return self._search_urls(request)[0]
@@ -607,19 +679,70 @@ class GoogleScholarBrowserAdapter(BrowserSearchAdapter):
     category = SourceCategory.ACADEMIC
     result_type = "paper"
     search_capabilities = {"paper", "author", "citation"}
-    min_interval_seconds = 30.0
+    # Official Scholar probes have their own 30-minute challenge cooldown.
+    # Keep the adapter-level interval short so live Crossref recovery is not
+    # forced to sleep for a full minute between independent queries.
+    min_interval_seconds = 1.0
     access_denied_cooldown_seconds = 21_600.0
     prefer_ego_before_camoufox = True
     preferred_backends = (
-        "patchright_chrome",
         "ego_browser",
+        "patchright_chrome",
         "scrapling_chrome",
         "camoufox",
     )
     managed_browser_proxy_ref = "omnisearch://sticky-proxy"
-    stop_on_access_denied = True
-    max_attempts = 3
+    stop_on_access_denied = False
+    max_attempts = 2
     max_concurrency = 1
+    official_probe_cooldown_seconds = 1_800.0
+
+    def __init__(
+        self,
+        *,
+        index_fallback: ProviderAdapter | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.index_fallback = index_fallback
+        self._official_retry_after = 0.0
+
+    async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+        now = asyncio.get_running_loop().time()
+        failure = ProviderError(
+            "ACCESS_DENIED",
+            "official Google Scholar probe is cooling down after an access challenge",
+            retryable=True,
+        )
+        if now >= self._official_retry_after:
+            try:
+                async for item in super().search(request):
+                    yield item
+                return
+            except ProviderError as scholar_error:
+                if self.index_fallback is None:
+                    raise
+                failure = scholar_error
+                self._official_retry_after = now + self.official_probe_cooldown_seconds
+        elif self.index_fallback is None:
+            raise failure
+        found = False
+        async for item in self.index_fallback.search(request):
+            found = True
+            yield item.model_copy(
+                update={
+                    "source_id": self.source_id,
+                    "adapter_id": "google_scholar_live_index",
+                    "raw_payload": {
+                        **item.raw_payload,
+                        "fallback_used": True,
+                        "fallback_path": f"{item.source_id}_live_academic_index",
+                        "scholar_failure_code": failure.code,
+                    },
+                }
+            )
+        if not found:
+            raise failure
 
     def _search_url(self, request: SearchRequest) -> str:
         language = (request.language or "en").split("-", 1)[0]
@@ -651,7 +774,22 @@ class GooglePatentsBrowserAdapter(BrowserSearchAdapter):
     result_type = "patent"
     search_capabilities = {"patent", "inventor", "assignee", "citation"}
     prefer_ego_before_camoufox = True
-    max_attempts = 4
+    max_attempts = 3
+
+    def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
+        scrapling = next(
+            (
+                fetcher
+                for fetcher in self.browser_fetchers
+                if getattr(fetcher, "backend_name", "") == "scrapling_chrome"
+            ),
+            None,
+        )
+        if scrapling is not None:
+            attempts.append((self._xhr_url(request), scrapling, FetchMode.HTTP))
+        attempts.extend(super()._attempts(request))
+        return attempts[: self.max_attempts]
 
     def _search_url(self, request: SearchRequest) -> str:
         return (
@@ -659,7 +797,46 @@ class GooglePatentsBrowserAdapter(BrowserSearchAdapter):
             f"&oq={quote_plus(request.query)}"
         )
 
+    @staticmethod
+    def _xhr_url(request: SearchRequest) -> str:
+        encoded_query = quote_plus(f"q={request.query}")
+        return f"https://patents.google.com/xhr/query?url={encoded_query}&exp="
+
     def _parse(self, source: str) -> list[dict[str, str]]:
+        json_source = source.lstrip()
+        if not json_source.startswith("{") and "application/json" not in json_source[:200]:
+            try:
+                extracted = html.fromstring(source).text_content().strip()
+            except (TypeError, ValueError):
+                extracted = ""
+            if extracted.startswith("{"):
+                json_source = extracted
+        if json_source.startswith("{"):
+            try:
+                payload = json.loads(json_source)
+            except json.JSONDecodeError:
+                payload = {}
+            records: list[dict[str, str]] = []
+            for cluster in (payload.get("results") or {}).get("cluster", []):
+                for result in cluster.get("result", []):
+                    data_result = result.get("id", "")
+                    patent = result.get("patent") or {}
+                    if not data_result.startswith("patent/"):
+                        continue
+                    patent_id = data_result.split("/", 2)[1]
+                    title = self._fragment_text(patent.get("title", ""))
+                    if not title:
+                        continue
+                    records.append(
+                        {
+                            "title": title,
+                            "url": f"https://patents.google.com/{data_result}",
+                            "snippet": self._fragment_text(patent.get("snippet", "")),
+                            "external_id_name": "patent",
+                            "external_id": patent_id,
+                        }
+                    )
+            return records
         tree = html.fromstring(source)
         records: list[dict[str, str]] = []
         for item in tree.cssselect("search-result-item"):
@@ -683,3 +860,9 @@ class GooglePatentsBrowserAdapter(BrowserSearchAdapter):
                 }
             )
         return records
+
+    @staticmethod
+    def _fragment_text(value: str) -> str:
+        if not value:
+            return ""
+        return " ".join(html.fromstring(f"<div>{value}</div>").text_content().split())

@@ -12,7 +12,7 @@ from omnisearch.core.evidence import EvidenceEvaluator, EvidenceItem
 from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
 from omnisearch.domain.enums import ResearchStatus, SourceCategory
 from omnisearch.domain.models import ResearchBudget, ResearchCreate, StrictModel
-from omnisearch.quality import evaluate_quality
+from omnisearch.quality.metrics import evaluate_quality
 from omnisearch.runtime import OmniRuntime, build_runtime
 from omnisearch.services.acquisition import AcquisitionRequest
 from omnisearch.services.crawl import CrawlRequest

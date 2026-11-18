@@ -70,6 +70,7 @@ class EgoBrowserFetcher(ContentFetcher):
         url = json.dumps(str(request.url))
         timeout = request.timeout_ms
         wait_after_load = request.wait_after_load_ms
+        wait_selector = json.dumps(request.wait_selector)
         marker = json.dumps(self._result_marker)
         return f"""const SPACE_ID = {space_id};
 const entry = SPACE_ID === null
@@ -85,8 +86,32 @@ const task = !entry
 const pages = await task.pages();
 const page = pages[0] ?? await task.adopt((await task.tabs())[0].page);
 try {{
-  await page.goto({url}, {{ timeout: {timeout} }});
+  const targetUrl = new URL({url});
+  const deadline = Date.now() + {timeout};
+  try {{
+    await page.goto(targetUrl.href, {{ timeout: {timeout} }});
+  }} catch (error) {{
+    // Ego deliberately stops a slow navigation at the deadline. Search pages
+    // are often already committed and interactive by then, so keep the usable
+    // document instead of throwing it away solely because the load event was
+    // late.
+    const currentUrl = new URL(await page.url());
+    const readyState = await page.evaluate(() => document.readyState);
+    const sameSearch = currentUrl.origin === targetUrl.origin
+      && currentUrl.pathname === targetUrl.pathname
+      && currentUrl.searchParams.get("q") === targetUrl.searchParams.get("q");
+    if (!sameSearch || readyState === "loading") throw error;
+  }}
   await page.waitForLoadState("domcontentloaded");
+  if ({wait_selector} !== null) {{
+    // Navigation and selector waiting share one deadline. On challenge pages
+    // the selector never appears; still return the page so the adapter can
+    // classify it instead of timing out without diagnostics.
+    const remaining = Math.max(500, deadline - Date.now());
+    try {{
+      await page.waitForSelector({wait_selector}, {{ timeout: remaining }});
+    }} catch {{}}
+  }}
   if ({wait_after_load} > 0) await page.waitForTimeout({wait_after_load});
   const content = await page.evaluate(() => {{
     const root = document.querySelector("main, article") ?? document.body;

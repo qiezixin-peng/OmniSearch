@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     mihomo_executable: Path = Path("C:/Program Files/Clash Verge/verge-mihomo.exe")
     search_api_timeout_seconds: float = Field(default=20.0, gt=0)
     search_browser_timeout_seconds: float = Field(default=35.0, gt=0)
+    browser_global_concurrency: int = Field(default=1, ge=1, le=8)
     search_cache_ttl_seconds: float = Field(default=900.0, ge=0)
     search_cache_max_entries: int = Field(default=2048, ge=1, le=100000)
     research_query_concurrency: int = Field(default=8, ge=1, le=64)

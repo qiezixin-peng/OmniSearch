@@ -31,6 +31,7 @@ class PatchrightFetcher(ContentFetcher):
 
     async def fetch(self, request: FetchRequest) -> FetchedDocument:
         self._validate(request)
+        started_at = asyncio.get_running_loop().time()
         proxy = self._resolve_proxy(request.proxy_secret_ref)
         profile = Path(request.chrome_user_data_dir or "") / "patchright"
         profile.mkdir(parents=True, exist_ok=True)
@@ -43,7 +44,8 @@ class PatchrightFetcher(ContentFetcher):
                 wait_until="domcontentloaded",
                 timeout=request.timeout_ms,
             )
-            await self._settle(page, request)
+            elapsed_ms = int((asyncio.get_running_loop().time() - started_at) * 1000)
+            await self._settle(page, request, max(250, request.timeout_ms - elapsed_ms))
             raw_html = await page.content()
             markdown = await self._body_text(page)
             final_url = page.url
@@ -106,9 +108,12 @@ class PatchrightFetcher(ContentFetcher):
             await manager.__aexit__(None, None, None)
 
     @staticmethod
-    async def _settle(page: Any, request: FetchRequest) -> None:
+    async def _settle(page: Any, request: FetchRequest, remaining_ms: int) -> None:
         if request.wait_selector:
-            await page.wait_for_selector(request.wait_selector, timeout=request.timeout_ms)
+            with suppress(Exception):
+                await page.wait_for_selector(
+                    request.wait_selector, timeout=min(5_000, remaining_ms)
+                )
         if request.network_idle:
             with suppress(Exception):
                 await page.wait_for_load_state(

@@ -162,6 +162,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         "browser_fallback_fetchers": browser_fallback_tuple,
         "ego_fetcher": ego,
         "chrome_user_data_dir": str(settings.chrome_user_data_dir),
+        "route_rotator": sticky_proxy.rotate,
     }
     x_browser = XBrowserAdapter(
         **browser_adapter_options,
@@ -186,13 +187,15 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     reddit_browser = RedditBrowserAdapter(
         **browser_adapter_options,
     )
+    openalex_adapter = OpenAlexAdapter(api_key=openalex_key)
+    crossref_adapter = CrossrefAdapter()
     rsshub_routes = [route.strip() for route in settings.rsshub_routes.split(",") if route.strip()]
     search = MultiSourceSearchService(
         [
             GitHubSearchAdapter(token=github_token),
-            ArxivAdapter(),
-            CrossrefAdapter(),
-            OpenAlexAdapter(api_key=openalex_key),
+            ArxivAdapter(index_fallback=openalex_adapter),
+            crossref_adapter,
+            openalex_adapter,
             SemanticScholarAdapter(api_key=semantic_scholar_key),
             StackExchangeAdapter(),
             GitLabAdapter(token=gitlab_token),
@@ -214,6 +217,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
                 **browser_adapter_options,
             ),
             GoogleScholarBrowserAdapter(
+                index_fallback=crossref_adapter,
                 **browser_adapter_options,
             ),
             GooglePatentsBrowserAdapter(
@@ -222,6 +226,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         ],
         api_timeout_seconds=settings.search_api_timeout_seconds,
         browser_timeout_seconds=settings.search_browser_timeout_seconds,
+        browser_max_concurrency=settings.browser_global_concurrency,
         cache_ttl_seconds=settings.search_cache_ttl_seconds,
         cache_max_entries=settings.search_cache_max_entries,
         attempt_recorder=provider_telemetry.record,

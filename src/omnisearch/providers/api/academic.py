@@ -4,6 +4,7 @@ from datetime import datetime
 from xml.etree import ElementTree
 
 import httpx
+from selectolax.parser import HTMLParser
 
 from omnisearch.domain.enums import Channel, SourceCategory
 from omnisearch.domain.models import ProviderCapabilities, SearchRequest, SearchResult
@@ -29,8 +30,23 @@ class ArxivAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://export.arxiv.org/api/query"
     min_interval_seconds = 3.0
 
-    def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
-        super().__init__(client=client, user_agent="OmniSearch/0.1 arXiv research client")
+    def __init__(
+        self,
+        *,
+        client: httpx.AsyncClient | None = None,
+        index_fallback: ProviderAdapter | None = None,
+    ) -> None:
+        # export.arxiv.org is frequently rate-limited on shared exits. Fail fast
+        # there and use arXiv's own live search page as the same-source fallback,
+        # instead of consuming the whole provider latency budget in retries.
+        super().__init__(
+            client=client,
+            user_agent="OmniSearch/0.1 arXiv research client",
+            timeout_seconds=12.0,
+            trust_environment_proxy=True,
+            max_attempts=1,
+        )
+        self._index_fallback = index_fallback
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -59,11 +75,26 @@ class ArxivAdapter(HttpProvider, ProviderAdapter):
             params["id_list"] = identifier_match.group(1)
         else:
             params["search_query"] = f"all:{request.query}"
-        xml = await self._get_text(
-            self.endpoint,
-            params=params,
-            headers={"Accept": "application/atom+xml"},
-        )
+        try:
+            xml = await self._get_text(
+                self.endpoint,
+                params=params,
+                headers={"Accept": "application/atom+xml"},
+            )
+        except ProviderError as api_error:
+            if self._index_fallback is not None:
+                found = False
+                try:
+                    async for item in self._search_index(request, api_error):
+                        found = True
+                        yield item
+                except ProviderError:
+                    pass
+                if found:
+                    return
+            async for item in self._search_html(request, api_error):
+                yield item
+            return
         try:
             root = ElementTree.fromstring(xml)
         except ElementTree.ParseError as error:
@@ -101,10 +132,100 @@ class ArxivAdapter(HttpProvider, ProviderAdapter):
                 },
             )
 
+    async def _search_index(
+        self, request: SearchRequest, api_error: ProviderError
+    ) -> AsyncIterator[SearchResult]:
+        assert self._index_fallback is not None
+        async for item in self._index_fallback.search(request):
+            identifier = self._indexed_arxiv_id(item)
+            if identifier is None:
+                continue
+            yield SearchResult(
+                source_id="arxiv",
+                adapter_id="arxiv_api",
+                channel=Channel.API,
+                result_type="paper",
+                title=item.title,
+                url=f"https://arxiv.org/abs/{identifier}",
+                original_language=item.original_language or "en",
+                snippet=item.snippet,
+                published_at=item.published_at,
+                authors=item.authors,
+                external_identifiers={"arxiv": identifier},
+                raw_payload={
+                    **item.raw_payload,
+                    "fallback_used": True,
+                    "fallback_path": "openalex_arxiv_live_index",
+                    "api_failure_code": api_error.code,
+                },
+            )
+
+    @staticmethod
+    def _indexed_arxiv_id(item: SearchResult) -> str | None:
+        candidates = [
+            item.url,
+            item.external_identifiers.get("doi", ""),
+            str(item.raw_payload.get("open_access") or ""),
+        ]
+        for value in candidates:
+            match = _ARXIV_ID.search(str(value))
+            if match:
+                return re.sub(r"v\d+$", "", match.group(1), flags=re.IGNORECASE)
+        return None
+
+    async def _search_html(
+        self, request: SearchRequest, api_error: ProviderError
+    ) -> AsyncIterator[SearchResult]:
+        html = await self._get_text(
+            "https://arxiv.org/search/",
+            params={
+                "query": request.query,
+                "searchtype": "all",
+                "abstracts": "show",
+                "order": "-announced_date_first",
+                "size": request.max_results,
+            },
+            headers={"Accept": "text/html"},
+        )
+        tree = HTMLParser(html)
+        for node in tree.css("li.arxiv-result")[: request.max_results]:
+            link = node.css_first("p.list-title a")
+            title_node = node.css_first("p.title")
+            if link is None or title_node is None:
+                continue
+            url = link.attributes.get("href", "").strip()
+            match = _ARXIV_ID.search(url)
+            if not url or match is None:
+                continue
+            identifier = re.sub(r"v\d+$", "", match.group(1), flags=re.IGNORECASE)
+            abstract = node.css_first("span.abstract-full") or node.css_first("span.abstract-short")
+            yield SearchResult(
+                source_id="arxiv",
+                adapter_id="arxiv_api",
+                channel=Channel.API,
+                result_type="paper",
+                title=" ".join(title_node.text().split()),
+                url=url,
+                original_language="en",
+                snippet=" ".join(abstract.text().split()) if abstract else None,
+                authors=[" ".join(author.text().split()) for author in node.css("p.authors a")],
+                external_identifiers={"arxiv": identifier},
+                raw_payload={
+                    "fallback_used": True,
+                    "fallback_path": "arxiv_live_search",
+                    "api_failure_code": api_error.code,
+                },
+            )
+
 
 class CrossrefAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.crossref.org/works"
     min_interval_seconds = 1.0
+
+    def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
+        # Stay inside both the API and Scholar recovery budgets. A 30-second
+        # socket timeout made one transient TLS failure stall an entire turn.
+        super().__init__(client=client, timeout_seconds=8.0, max_attempts=2)
 
     @property
     def capabilities(self) -> ProviderCapabilities:

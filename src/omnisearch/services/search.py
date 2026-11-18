@@ -22,7 +22,6 @@ from omnisearch.providers.base import ProviderAdapter, ProviderError
 class _SourceState:
     consecutive_failures: int = 0
     open_until: float = 0.0
-    stale_first_until: float = 0.0
     next_allowed_at: float = 0.0
     last_failure_code: str | None = None
     last_error: str | None = None
@@ -88,6 +87,7 @@ class MultiSourceSearchService:
         browser_timeout_seconds: float = 40.0,
         cache_ttl_seconds: float = 900.0,
         cache_max_entries: int = 2048,
+        browser_max_concurrency: int = 2,
         attempt_recorder: Callable[[dict[str, Any]], None] | None = None,
         stale_fallback_loader: (
             Callable[[str, QuickSearchCommand], list[SearchResult]] | None
@@ -99,6 +99,7 @@ class MultiSourceSearchService:
             for source_id, adapter in self._adapters.items()
         }
         self._rate_locks = {source_id: asyncio.Lock() for source_id in self._adapters}
+        self._browser_semaphore = asyncio.Semaphore(browser_max_concurrency)
         self._states = {source_id: _SourceState() for source_id in self._adapters}
         self.api_timeout_seconds = api_timeout_seconds
         self.browser_timeout_seconds = browser_timeout_seconds
@@ -139,13 +140,8 @@ class MultiSourceSearchService:
                 item.get("recovered_attempts", 0)
             )
             if adapter.capabilities.channel is Channel.BROWSER:
-                # Do not circuit-break a proxy-sensitive browser provider.
-                # Prefer exact persisted results briefly, but still try live
-                # when no matching cache exists or the hint expires.
-                if failures >= minimum_failures and failures > completions * 2:
-                    state = self._states[source_id]
-                    state.consecutive_failures = failures
-                    state.stale_first_until = monotonic() + min(cooldown_seconds, 300.0)
+                # A changed proxy or browser session may recover immediately;
+                # durable browser failures must never suppress a live probe.
                 continue
             if source_id not in self._states or failures < minimum_failures or completions:
                 continue
@@ -318,32 +314,20 @@ class MultiSourceSearchService:
         command: QuickSearchCommand,
         adapter: ProviderAdapter,
     ) -> tuple[list[SearchResult], SourceFailure | None]:
+        if adapter.capabilities.channel is Channel.BROWSER:
+            async with self._browser_semaphore:
+                return await self._search_uncached_bounded(
+                    source_id, command, adapter
+                )
+        return await self._search_uncached_bounded(source_id, command, adapter)
+
+    async def _search_uncached_bounded(
+        self,
+        source_id: str,
+        command: QuickSearchCommand,
+        adapter: ProviderAdapter,
+    ) -> tuple[list[SearchResult], SourceFailure | None]:
         state = self._states[source_id]
-        if state.stale_first_until > monotonic():
-            cached = self._load_stale_records(source_id, command)
-            if cached:
-                failure = SourceFailure(
-                    source_id=source_id,
-                    adapter_id=adapter.capabilities.adapter_id,
-                    code="STALE_CACHE_USED",
-                    message=(
-                        "provider is temporarily degraded; reused recent persisted results "
-                        "while the browser route cools down"
-                    ),
-                    retryable=True,
-                )
-                self._record_attempt(
-                    source_id=source_id,
-                    adapter_id=adapter.capabilities.adapter_id,
-                    channel=adapter.capabilities.channel.value,
-                    outcome="recovered",
-                    command=command,
-                    code=failure.code,
-                    message=failure.message,
-                    retryable=True,
-                    result_count=len(cached),
-                )
-                return cached, failure
         if state.open_until > monotonic():
             self._record_attempt(
                 source_id=source_id,
@@ -413,7 +397,6 @@ class MultiSourceSearchService:
                         records = [item async for item in adapter.search(request)]
                 state.consecutive_failures = 0
                 state.open_until = 0.0
-                state.stale_first_until = 0.0
                 state.last_failure_code = None
                 state.last_error = None
                 state.last_success_at = datetime.now(UTC)
@@ -579,8 +562,6 @@ class MultiSourceSearchService:
         # already bounds and rotates its browser backends, so a provider-wide
         # circuit would incorrectly skip later queries after a proxy change.
         if self._adapters[source_id].capabilities.channel is Channel.BROWSER:
-            if state.consecutive_failures >= 2:
-                state.stale_first_until = monotonic() + 300.0
             return
         immediate = code in {"RATE_LIMITED", "ACCESS_DENIED", "NOT_CONFIGURED"}
         if immediate or not retryable or state.consecutive_failures >= 2:

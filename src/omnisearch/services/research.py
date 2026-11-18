@@ -228,6 +228,12 @@ class ResearchExecutionService:
             if strict_quality
             else []
         )
+        if strict_quality and any(
+            failure.code == "STALE_CACHE_USED"
+            for execution in executions
+            for failure in execution.failures
+        ):
+            quality_issues.append("live_provider_path_not_recovered")
         final_status = (
             ResearchStatus.COMPLETED
             if summary["unique_results"] > 0

@@ -298,7 +298,7 @@ async def test_live_failure_can_recover_exact_query_from_persisted_cache() -> No
 
 
 @pytest.mark.asyncio
-async def test_degraded_browser_uses_persisted_result_before_another_live_timeout() -> None:
+async def test_degraded_browser_still_probes_live_before_persisted_fallback() -> None:
     adapter = FakeBrowserAdapter(
         "google", error=ProviderError("ACCESS_DENIED", "blocked route", retryable=True)
     )
@@ -325,7 +325,7 @@ async def test_degraded_browser_uses_persisted_result_before_another_live_timeou
     await service.search(QuickSearchCommand(query="failure two", sources=["google"]))
     response = await service.search(QuickSearchCommand(query="repeated", sources=["google"]))
 
-    assert calls == 2
+    assert calls == 3
     assert response.failures[0].code == "STALE_CACHE_USED"
     assert len(response.results) == 1
 

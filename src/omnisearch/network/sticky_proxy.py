@@ -1,8 +1,10 @@
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import yaml
@@ -37,6 +39,9 @@ class StickyProxyManager:
         self.proxy_port = proxy_port
         self.controller_port = controller_port
         self.enabled = enabled
+        self._last_egress_check = 0.0
+        self._rotation_cursor = 0
+        self._rotation_lock = threading.Lock()
 
     def resolve(self, reference: str) -> dict[str, str]:
         if reference != "omnisearch://sticky-proxy":
@@ -47,7 +52,7 @@ class StickyProxyManager:
     def ensure(self) -> None:
         if not self.enabled:
             raise StickyProxyUnavailable("the sticky proxy is disabled")
-        if self._healthy():
+        if self._healthy() and self._egress_healthy():
             return
         if not self.mihomo_executable.is_file():
             raise StickyProxyUnavailable("the Mihomo executable is unavailable")
@@ -64,7 +69,7 @@ class StickyProxyManager:
                 os.close(descriptor)
                 break
             except FileExistsError:
-                if self._healthy():
+                if self._healthy() and self._egress_healthy():
                     return
                 if time.monotonic() >= deadline:
                     try:
@@ -78,17 +83,83 @@ class StickyProxyManager:
                     ) from None
                 time.sleep(0.2)
         try:
-            if self._healthy():
+            if self._healthy() and self._egress_healthy():
                 return
-            self._prepare_runtime(source)
-            self._start()
-            for _ in range(50):
-                if self._healthy():
+            if self._healthy():
+                self._stop()
+            for _attempt in range(2):
+                self._prepare_runtime(source)
+                self._start()
+                for _ in range(50):
+                    if self._healthy():
+                        break
+                    time.sleep(0.1)
+                if self._healthy() and self._egress_healthy(force=True):
                     return
-                time.sleep(0.1)
-            raise StickyProxyUnavailable("the private Mihomo process did not become healthy")
+                self._stop()
+            raise StickyProxyUnavailable(
+                "the private Mihomo process has no healthy internet egress"
+            )
         finally:
             lock.unlink(missing_ok=True)
+
+    def rotate(self, reason: str = "provider_challenge") -> str | None:
+        """Rotate only the private selector after a route-specific challenge."""
+        del reason  # reserved for future telemetry without leaking query data
+        with self._rotation_lock:
+            self.ensure()
+            try:
+                response = httpx.get(
+                    f"http://127.0.0.1:{self.controller_port}/proxies",
+                    timeout=2.0,
+                    trust_env=False,
+                )
+                response.raise_for_status()
+                proxies = response.json().get("proxies", {})
+            except (httpx.HTTPError, ValueError) as error:
+                raise StickyProxyUnavailable("cannot inspect private proxy routes") from error
+            group_name = next(
+                (
+                    name
+                    for name, item in proxies.items()
+                    if item.get("type") == "Selector" and "TAGSS" in name
+                ),
+                None,
+            )
+            if group_name is None:
+                raise StickyProxyUnavailable("private proxy selector was not found")
+            group = proxies[group_name]
+            current = group.get("now")
+            blocked_labels = ("官网", "流量", "剩余", "到期", "重置", "套餐")
+            candidates = [
+                name
+                for name in group.get("all", [])
+                if name != current
+                and not any(label in name for label in blocked_labels)
+                and (proxies.get(name) or {}).get("type")
+                not in {"Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"}
+            ]
+            if not candidates:
+                raise StickyProxyUnavailable("private proxy selector has no alternate nodes")
+            start = self._rotation_cursor % len(candidates)
+            ordered = candidates[start:] + candidates[:start]
+            for offset, candidate in enumerate(ordered[:6], start=1):
+                try:
+                    result = httpx.put(
+                        f"http://127.0.0.1:{self.controller_port}/proxies/"
+                        f"{quote(group_name, safe='')}",
+                        json={"name": candidate},
+                        timeout=2.0,
+                        trust_env=False,
+                    )
+                    result.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+                self._last_egress_check = 0.0
+                if self._egress_healthy(force=True, timeout=2.0):
+                    self._rotation_cursor = start + offset
+                    return candidate
+            raise StickyProxyUnavailable("no alternate private proxy node has healthy egress")
 
     def _prepare_runtime(self, source: Path) -> None:
         config = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -164,6 +235,43 @@ class StickyProxyManager:
             )
         finally:
             log.close()
+
+    def _stop(self) -> None:
+        pid_path = self.runtime_dir / "mihomo.pid"
+        try:
+            pid = int(pid_path.read_text(encoding="ascii").strip())
+        except (FileNotFoundError, ValueError):
+            return
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+            check=False,
+        )
+        pid_path.unlink(missing_ok=True)
+        self._last_egress_check = 0.0
+
+    def _egress_healthy(self, *, force: bool = False, timeout: float = 3.0) -> bool:
+        now = time.monotonic()
+        if not force and now - self._last_egress_check < 10:
+            return True
+        try:
+            response = httpx.get(
+                "https://www.google.com/generate_204",
+                proxy=f"http://127.0.0.1:{self.proxy_port}",
+                timeout=timeout,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            healthy = response.status_code in {200, 204}
+        except httpx.HTTPError:
+            healthy = False
+        if healthy:
+            self._last_egress_check = now
+        return healthy
 
     def _healthy(self) -> bool:
         try:

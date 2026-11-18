@@ -114,6 +114,71 @@ async def test_arxiv_id_query_is_exact_and_version_is_normalized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arxiv_uses_live_search_when_export_api_is_rate_limited() -> None:
+    html = """
+    <ol><li class="arxiv-result">
+      <p class="list-title"><a href="https://arxiv.org/abs/2401.17264">arXiv</a></p>
+      <p class="title">Proactive Detection of Voice Cloning</p>
+      <p class="authors"><a>Robin Researcher</a></p>
+      <span class="abstract-full">Localized audio watermarking.</span>
+    </li></ol>
+    """
+
+    async def handler(incoming: httpx.Request) -> httpx.Response:
+        if incoming.url.host == "export.arxiv.org":
+            return httpx.Response(429, text="rate limited")
+        assert incoming.url.host == "arxiv.org"
+        return httpx.Response(200, text=html)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = [item async for item in ArxivAdapter(client=client).search(request())]
+
+    assert results[0].external_identifiers["arxiv"] == "2401.17264"
+    assert results[0].raw_payload == {
+        "fallback_used": True,
+        "fallback_path": "arxiv_live_search",
+        "api_failure_code": "RATE_LIMITED",
+    }
+
+
+@pytest.mark.asyncio
+async def test_arxiv_prefers_live_openalex_index_before_html_fallback() -> None:
+    async def arxiv_handler(incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="rate limited")
+
+    async def index_handler(incoming: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "https://openalex.org/W1",
+                        "doi": "https://doi.org/10.48550/arxiv.2401.17264",
+                        "display_name": "Localized Watermarking",
+                        "type": "preprint",
+                        "language": "en",
+                        "authorships": [],
+                        "open_access": {"oa_url": "https://arxiv.org/pdf/2401.17264"},
+                    }
+                ]
+            },
+        )
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(arxiv_handler)) as arxiv_client,
+        httpx.AsyncClient(transport=httpx.MockTransport(index_handler)) as index_client,
+    ):
+        adapter = ArxivAdapter(
+            client=arxiv_client,
+            index_fallback=OpenAlexAdapter(client=index_client),
+        )
+        results = [item async for item in adapter.search(request())]
+
+    assert str(results[0].url) == "https://arxiv.org/abs/2401.17264"
+    assert results[0].raw_payload["fallback_path"] == "openalex_arxiv_live_index"
+
+
+@pytest.mark.asyncio
 async def test_crossref_and_openalex_expose_doi_for_cross_source_dedup() -> None:
     async def crossref_handler(incoming: httpx.Request) -> httpx.Response:
         return httpx.Response(
