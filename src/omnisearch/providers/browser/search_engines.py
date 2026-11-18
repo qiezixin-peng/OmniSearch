@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Callable
@@ -43,12 +44,14 @@ class BrowserSearchAdapter(ProviderAdapter):
         chrome_user_data_dir: str,
         browser_fallback_fetchers: tuple[ContentFetcher, ...] = (),
         route_rotator: Callable[[str], str | None] | None = None,
+        route_identity: Callable[[], str | None] | None = None,
     ) -> None:
         self.chrome_fetcher = chrome_fetcher
         self.browser_fetchers = (chrome_fetcher, *browser_fallback_fetchers)
         self.ego_fetcher = ego_fetcher
         self.chrome_user_data_dir = str(Path(chrome_user_data_dir) / self.source_id)
         self.route_rotator = route_rotator
+        self.route_identity = route_identity
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -86,7 +89,7 @@ class BrowserSearchAdapter(ProviderAdapter):
                             mode=mode,
                             timeout_ms=fetch_timeout_ms,
                             chrome_user_data_dir=(
-                                self.chrome_user_data_dir
+                                await self._managed_profile_dir()
                                 if mode is FetchMode.CHROME_MANAGED
                                 else None
                             ),
@@ -118,7 +121,10 @@ class BrowserSearchAdapter(ProviderAdapter):
                         failures.append(f"{mode.value} {url}: access challenge or rate limit")
                         if mode is not FetchMode.EGO_BROWSER and self.route_rotator:
                             try:
-                                self.route_rotator(f"{self.source_id}:access_denied")
+                                await asyncio.to_thread(
+                                    self.route_rotator,
+                                    f"{self.source_id}:access_denied",
+                                )
                             except Exception as error:
                                 failures.append(f"proxy rotation failed: {error}")
                         if self.stop_on_access_denied:
@@ -232,6 +238,19 @@ class BrowserSearchAdapter(ProviderAdapter):
         if getattr(fetcher, "backend_name", "") == "camoufox":
             return self.slow_backend_timeout_ms
         return self.attempt_timeout_ms
+
+    async def _managed_profile_dir(self) -> str:
+        """Bind cookies and browser storage to the stable proxy egress."""
+        route = None
+        if self.route_identity is not None:
+            try:
+                route = await asyncio.to_thread(self.route_identity)
+            except Exception:
+                route = None
+        if not route:
+            return str(Path(self.chrome_user_data_dir) / "default")
+        route_key = hashlib.sha256(route.encode("utf-8")).hexdigest()[:16]
+        return str(Path(self.chrome_user_data_dir) / route_key)
 
     @staticmethod
     def _backend_name(fetcher: ContentFetcher, mode: FetchMode) -> str:
@@ -441,10 +460,10 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
         )
         if scrapling is not None:
             # The official Lite endpoint normally completes in about one second.
-            # On a challenge, BrowserSearchAdapter rotates the sticky route; retry
-            # the same low-cost endpoint once on the new egress before launching
-            # Chrome. Ego used to sit between these attempts and repeatedly spent
-            # 12s on the same challenge page without improving result coverage.
+            # On a challenge, BrowserSearchAdapter rotates the sticky route. Move
+            # directly to a real browser on that egress and retain one browser
+            # retry after a second rotation. Repeating Lite commonly challenges
+            # the new route too without adding coverage.
             attempts.extend(
                 [
                     (
@@ -452,7 +471,7 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
                         scrapling,
                         FetchMode.HTTP,
                     ),
-                    (html_url, scrapling, FetchMode.HTTP),
+                    (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
                     (dynamic_url, self.chrome_fetcher, FetchMode.CHROME_MANAGED),
                 ]
             )
@@ -478,7 +497,7 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
 
     def _timeout_for_attempt(self, fetcher: ContentFetcher, mode: FetchMode) -> int:
         # Including the outer 3s cancellation/cleanup allowance, the worst-case
-        # chain is 8s + 8s + 9s = 25s, safely below the 35s source deadline.
+        # chain is 8s + 9s + 9s = 26s, safely below the 35s source deadline.
         return 5_000 if mode is FetchMode.HTTP else 6_000
 
     def _relaxed_search_url(self, request: SearchRequest) -> str:

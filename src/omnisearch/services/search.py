@@ -369,9 +369,9 @@ class MultiSourceSearchService:
                     message="source is temporarily paused after repeated provider failures",
                     retryable=True,
                 )
+            minimum_interval = float(getattr(adapter, "min_interval_seconds", 0.0))
             try:
                 started_at = monotonic()
-                minimum_interval = float(getattr(adapter, "min_interval_seconds", 0.0))
                 async with self._rate_locks[source_id]:
                     delay = state.next_allowed_at - monotonic()
                     if delay > 0:
@@ -491,6 +491,16 @@ class MultiSourceSearchService:
                     code="ADAPTER_ERROR",
                     message=str(error),
                 )
+            finally:
+                # Search engines rate-limit request bursts after a response, not
+                # merely close-together start times. Slow browser navigation used
+                # to consume the whole interval and let the next queued query fire
+                # immediately, which caused multilingual batches to look robotic.
+                if minimum_interval > 0:
+                    async with self._rate_locks[source_id]:
+                        state.next_allowed_at = max(
+                            state.next_allowed_at, monotonic() + minimum_interval
+                        )
 
     def _recover_from_stale_cache(
         self,

@@ -283,17 +283,36 @@ def test_duckduckgo_scrapling_chain_fits_source_latency_budget() -> None:
 
     assert [mode.value for _, _, mode in attempts] == [
         "http",
-        "http",
+        "chrome_managed",
         "chrome_managed",
     ]
-    assert attempts[0][0] == attempts[1][0]
-    assert all(fetcher is scrapling for _, fetcher, _ in attempts[:2])
-    assert attempts[2][1] is chrome
+    assert attempts[0][1] is scrapling
+    assert all(fetcher is chrome for _, fetcher, _ in attempts[1:])
     total_outer_budget_ms = sum(
         adapter._timeout_for_attempt(fetcher, mode) + 3_000
         for _, fetcher, mode in attempts
     )
-    assert total_outer_budget_ms == 25_000
+    assert total_outer_budget_ms == 26_000
+
+
+@pytest.mark.asyncio
+async def test_managed_browser_profile_follows_sticky_route() -> None:
+    route = ["node-a"]
+    fetcher = FakeFetcher("")
+    adapter = GoogleBrowserAdapter(
+        chrome_fetcher=fetcher,
+        ego_fetcher=fetcher,
+        chrome_user_data_dir="C:/dedicated",
+        route_identity=lambda: route[0],
+    )
+
+    first = await adapter._managed_profile_dir()
+    route[0] = "node-b"
+    second = await adapter._managed_profile_dir()
+
+    assert first != second
+    assert first.startswith(str(adapter.chrome_user_data_dir))
+    assert "node-a" not in first
 
 
 def test_duckduckgo_scoped_query_uses_relaxed_discovery_and_filters_scope() -> None:

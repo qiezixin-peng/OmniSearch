@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import time
 
 import yaml
 
@@ -68,3 +69,20 @@ def test_ensure_rotates_away_from_dead_initial_route(tmp_path: Path, monkeypatch
     manager.ensure()
 
     assert rotations == [True]
+
+
+def test_provider_challenge_quarantine_is_persistent_and_scoped(tmp_path: Path) -> None:
+    manager = StickyProxyManager(
+        runtime_dir=tmp_path / "runtime",
+        clash_config_dir=tmp_path / "clash",
+        mihomo_executable=tmp_path / "mihomo.exe",
+        route_quarantine_seconds=600,
+    )
+
+    manager._quarantine_route("google", "node-a")
+
+    assert manager._active_quarantined_routes("google") == {"node-a"}
+    assert manager._active_quarantined_routes("duckduckgo") == set()
+    quarantine = manager.runtime_dir / "route-quarantine.json"
+    assert quarantine.is_file()
+    assert quarantine.stat().st_mtime <= time()

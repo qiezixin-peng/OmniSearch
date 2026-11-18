@@ -171,6 +171,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         "ego_fetcher": ego,
         "chrome_user_data_dir": str(settings.chrome_user_data_dir),
         "route_rotator": sticky_proxy.rotate,
+        "route_identity": sticky_proxy.current_route,
     }
     x_browser = XBrowserAdapter(
         **browser_adapter_options,

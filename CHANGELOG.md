@@ -6,6 +6,11 @@
 
 ### Changed
 
+- Google、DuckDuckGo 浏览器入口将持久会话绑定到稳定代理出口，出口被限制后按来源隔离
+  6 小时并切换到独立浏览器资料目录，避免新出口继承旧出口的受限 Cookie；DuckDuckGo
+  回退链改为 Lite 一次加托管浏览器两次，不再重复撞击受限 Lite 端点。来源节流改为从
+  上一次请求完成后计时，避免多语言队列在慢请求结束后立即连续发起搜索。代理检测与
+  切换移至后台线程，运行时 Supervisor 也会复核短暂健康失败，避免搜索过程中误杀 API。
 - Windows 下 Ego Browser 与 Camoufox 子进程统一使用无窗口启动标志；SessionStart Hook
   直接复用当前 PowerShell 宿主，不再创建可能闪现的嵌套终端，并以 PowerShell 调用状态
   判断恢复结果，避免空的进程退出码被误报为恢复失败。

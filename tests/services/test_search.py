@@ -151,6 +151,30 @@ async def test_concurrent_identical_searches_are_coalesced() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_interval_is_measured_after_previous_completion() -> None:
+    completed_at: list[float] = []
+    started_at: list[float] = []
+
+    class PacedAdapter(FakeAdapter):
+        min_interval_seconds = 0.03
+
+        async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+            started_at.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.02)
+            completed_at.append(asyncio.get_running_loop().time())
+            yield paper(self.source_id, f"https://example.org/{len(started_at)}")
+
+    service = MultiSourceSearchService([PacedAdapter("crossref")])
+    await asyncio.gather(
+        service.search(QuickSearchCommand(query="first", sources=["crossref"])),
+        service.search(QuickSearchCommand(query="second", sources=["crossref"])),
+    )
+
+    assert len(started_at) == 2
+    assert started_at[1] - completed_at[0] >= 0.025
+
+
+@pytest.mark.asyncio
 async def test_slow_source_is_bounded_by_channel_timeout() -> None:
     class SlowAdapter(FakeAdapter):
         async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:

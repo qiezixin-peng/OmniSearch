@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,9 @@ class ScraplingFetcher(ContentFetcher):
 
     async def fetch(self, request: FetchRequest) -> FetchedDocument:
         self._validate_profile(request)
-        proxy = self._resolve_proxy(request.proxy_secret_ref)
+        proxy = await asyncio.to_thread(
+            self._resolve_proxy, request.proxy_secret_ref
+        )
         if request.mode is FetchMode.HTTP:
             response = await self._get_http_fetch()(
                 str(request.url),

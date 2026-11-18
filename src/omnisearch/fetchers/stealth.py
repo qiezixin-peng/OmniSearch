@@ -41,7 +41,9 @@ class PatchrightFetcher(ContentFetcher):
     async def fetch(self, request: FetchRequest) -> FetchedDocument:
         self._validate(request)
         started_at = asyncio.get_running_loop().time()
-        proxy = self._resolve_proxy(request.proxy_secret_ref)
+        proxy = await asyncio.to_thread(
+            self._resolve_proxy, request.proxy_secret_ref
+        )
         profile = Path(request.chrome_user_data_dir or "") / "patchright"
         profile.mkdir(parents=True, exist_ok=True)
         async with self._context(request, profile, proxy) as context:
@@ -190,7 +192,9 @@ class CamoufoxFetcher(ContentFetcher):
             raise StealthBrowserUnavailable(
                 f"Camoufox runtime is missing: {self.python_executable}"
             )
-        proxy = self._resolve_proxy(request.proxy_secret_ref)
+        proxy = await asyncio.to_thread(
+            self._resolve_proxy, request.proxy_secret_ref
+        )
         profile = Path(request.chrome_user_data_dir or "") / "camoufox"
         profile.mkdir(parents=True, exist_ok=True)
         payload = {

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ class StickyProxyManager:
         proxy_port: int = 17897,
         controller_port: int = 19097,
         enabled: bool = True,
+        route_quarantine_seconds: float = 21_600.0,
     ) -> None:
         self.runtime_dir = Path(runtime_dir) / "sticky-proxy"
         self.clash_config_dir = Path(clash_config_dir).expanduser().resolve()
@@ -39,6 +41,7 @@ class StickyProxyManager:
         self.proxy_port = proxy_port
         self.controller_port = controller_port
         self.enabled = enabled
+        self.route_quarantine_seconds = route_quarantine_seconds
         self._last_egress_check = 0.0
         self._rotation_cursor = 0
         self._rotation_lock = threading.Lock()
@@ -115,12 +118,21 @@ class StickyProxyManager:
 
     def rotate(self, reason: str = "provider_challenge") -> str | None:
         """Rotate only the private selector after a route-specific challenge."""
-        del reason  # reserved for future telemetry without leaking query data
         with self._rotation_lock:
             self.ensure()
-            return self._rotate_unlocked()
+            return self._rotate_unlocked(reason)
 
-    def _rotate_unlocked(self) -> str:
+    def current_route(self) -> str | None:
+        """Return the private selector route without exposing it outside the process."""
+        try:
+            self.ensure()
+            _proxies, _group_name, group = self._selector_snapshot()
+        except StickyProxyUnavailable:
+            return None
+        current = group.get("now")
+        return current if isinstance(current, str) and current else None
+
+    def _selector_snapshot(self) -> tuple[dict, str, dict]:
         try:
             response = httpx.get(
                 f"http://127.0.0.1:{self.controller_port}/proxies",
@@ -142,7 +154,15 @@ class StickyProxyManager:
         if group_name is None:
             raise StickyProxyUnavailable("private proxy selector was not found")
         group = proxies[group_name]
+        return proxies, group_name, group
+
+    def _rotate_unlocked(self, reason: str = "") -> str:
+        proxies, group_name, group = self._selector_snapshot()
         current = group.get("now")
+        scope = reason.partition(":")[0] if reason.endswith(":access_denied") else ""
+        if scope and isinstance(current, str):
+            self._quarantine_route(scope, current)
+        quarantined = self._active_quarantined_routes(scope) if scope else set()
         blocked_labels = ("官网", "流量", "剩余", "到期", "重置", "套餐")
         candidates = [
             name
@@ -152,6 +172,9 @@ class StickyProxyManager:
             and (proxies.get(name) or {}).get("type")
             not in {"Selector", "URLTest", "Fallback", "LoadBalance", "Direct", "Reject"}
         ]
+        preferred = [name for name in candidates if name not in quarantined]
+        if preferred:
+            candidates = preferred
         if not candidates:
             raise StickyProxyUnavailable("private proxy selector has no alternate nodes")
         start = self._rotation_cursor % len(candidates)
@@ -173,6 +196,54 @@ class StickyProxyManager:
                 self._rotation_cursor = start + offset
                 return candidate
         raise StickyProxyUnavailable("no alternate private proxy node has healthy egress")
+
+    def _active_quarantined_routes(self, scope: str) -> set[str]:
+        path = self.runtime_dir / "route-quarantine.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return set()
+        now = time.time()
+        entries = payload.get(scope, {}) if isinstance(payload, dict) else {}
+        if not isinstance(entries, dict):
+            return set()
+        return {
+            name
+            for name, expires_at in entries.items()
+            if isinstance(name, str)
+            and isinstance(expires_at, (int, float))
+            and expires_at > now
+        }
+
+    def _quarantine_route(self, scope: str, route: str) -> None:
+        path = self.runtime_dir / "route-quarantine.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        now = time.time()
+        cleaned: dict[str, dict[str, float]] = {}
+        for key, entries in payload.items():
+            if not isinstance(key, str) or not isinstance(entries, dict):
+                continue
+            active = {
+                name: float(expires_at)
+                for name, expires_at in entries.items()
+                if isinstance(name, str)
+                and isinstance(expires_at, (int, float))
+                and expires_at > now
+            }
+            if active:
+                cleaned[key] = active
+        cleaned.setdefault(scope, {})[route] = now + self.route_quarantine_seconds
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(path)
 
     def _prepare_runtime(self, source: Path) -> None:
         config = yaml.safe_load(source.read_text(encoding="utf-8"))

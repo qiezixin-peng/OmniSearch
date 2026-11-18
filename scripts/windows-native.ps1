@@ -167,6 +167,16 @@ function Test-ServiceHealth([hashtable]$Service) {
     }
 }
 
+function Test-ServiceNeedsRecovery([hashtable]$Service) {
+    if (Test-ServiceHealth $Service) {
+        return $false
+    }
+    # A health probe can overlap a short database commit or browser setup.
+    # Confirm once before killing a process that may still be serving work.
+    Start-Sleep -Seconds 1
+    return -not (Test-ServiceHealth $Service)
+}
+
 function Get-ProcessTreeIds([int]$RootPid) {
     try {
         $AllProcesses = @(Get-CimInstance Win32_Process)
@@ -318,7 +328,7 @@ function Ensure-Services {
     New-Item -ItemType Directory -Force -Path $ProcessDir, $LogDir | Out-Null
 
     $Services = @(Get-ServiceDefinitions)
-    $Unhealthy = @($Services | Where-Object { -not (Test-ServiceHealth $_) })
+    $Unhealthy = @($Services | Where-Object { Test-ServiceNeedsRecovery $_ })
     if ($Unhealthy.Count -eq 0) {
         if (-not $Quiet) {
             Write-Output "OmniSearch runtime is healthy."
