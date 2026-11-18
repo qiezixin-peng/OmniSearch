@@ -1,8 +1,13 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
+import praw
+from praw.exceptions import PRAWException
+from prawcore import PrawcoreException
 
 from omnisearch.domain.enums import Channel, SourceCategory
 from omnisearch.domain.models import ProviderCapabilities, SearchRequest, SearchResult
@@ -59,9 +64,7 @@ class SemanticScholarAdapter(HttpProvider, ProviderAdapter):
             doi = identifiers.get("DOI")
             paper_id = item.get("paperId")
             url = item.get("url") or (
-                f"https://www.semanticscholar.org/paper/{paper_id}"
-                if paper_id
-                else None
+                f"https://www.semanticscholar.org/paper/{paper_id}" if paper_id else None
             )
             if not url:
                 continue
@@ -204,6 +207,96 @@ class GitLabAdapter(HttpProvider, ProviderAdapter):
                     "updated_at": item.get("last_activity_at"),
                 },
             )
+
+
+class PrawRedditAdapter(ProviderAdapter):
+    """Credentialed Reddit search through the maintained PRAW client."""
+
+    min_interval_seconds = 1.0
+
+    def __init__(
+        self,
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        user_agent: str = "OmniSearch/0.1 research engine",
+        fallback: ProviderAdapter | None = None,
+        reddit: Any | None = None,
+    ) -> None:
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.user_agent = user_agent
+        self.fallback = fallback
+        self._reddit = reddit
+        if reddit is None and client_id and client_secret:
+            self._reddit = praw.Reddit(
+                client_id=client_id,
+                client_secret=client_secret,
+                user_agent=user_agent,
+                check_for_async=False,
+            )
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            source_id="reddit",
+            adapter_id="reddit_praw",
+            category=SourceCategory.COMMUNITY,
+            channel=Channel.API,
+            supported_languages={"*"},
+            search_capabilities={"post", "comment", "community"},
+            supports_pagination=False,
+            supports_date_filter=False,
+            max_concurrency=1,
+            requires_credentials=True,
+            backend="praw",
+        )
+
+    async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+        if self._reddit is None:
+            raise ProviderError("NOT_CONFIGURED", "Reddit OAuth credentials are not configured")
+        try:
+            submissions = await asyncio.to_thread(
+                self._search_sync, request.query, request.max_results
+            )
+        except (PRAWException, PrawcoreException, OSError, RuntimeError) as error:
+            if self.fallback is None:
+                raise ProviderError("REDDIT_API_ERROR", str(error), retryable=True) from error
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = "REDDIT_API_ERROR"
+                result.raw_payload["reddit_api_error"] = str(error)[:500]
+                yield result
+            return
+        for item in submissions:
+            permalink = str(getattr(item, "permalink", ""))
+            if not permalink:
+                continue
+            name = str(getattr(item, "name", ""))
+            yield SearchResult(
+                source_id="reddit",
+                adapter_id="reddit_praw",
+                channel=Channel.API,
+                result_type="post",
+                title=str(getattr(item, "title", "Untitled post")),
+                url=f"https://www.reddit.com{permalink}",
+                original_language=None,
+                snippet=str(getattr(item, "selftext", ""))[:1000] or None,
+                published_at=_unix(getattr(item, "created_utc", None)),
+                authors=[str(getattr(item, "author", ""))],
+                external_identifiers={"reddit_post_id": name} if name else {},
+                raw_payload={
+                    "subreddit": str(getattr(item, "subreddit", "")),
+                    "score": getattr(item, "score", None),
+                    "num_comments": getattr(item, "num_comments", None),
+                },
+            )
+
+    def _search_sync(self, query: str, limit: int) -> list[Any]:
+        return list(
+            self._reddit.subreddit("all").search(
+                query, sort="relevance", time_filter="all", limit=limit
+            )
+        )
 
 
 class RedditAdapter(HttpProvider, ProviderAdapter):

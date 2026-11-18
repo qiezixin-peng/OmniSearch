@@ -58,6 +58,7 @@ class AdapterReliability(StrEnum):
 
     PUBLIC_API = "public_api"
     CREDENTIALED_API = "credentialed_api"
+    SOURCE_CLIENT = "source_client"
     BROWSER_BEST_EFFORT = "browser_best_effort"
 
 

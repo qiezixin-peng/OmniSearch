@@ -10,13 +10,9 @@ from omnisearch.runtime import build_runtime
 
 @pytest.mark.asyncio
 async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(
-        "OMNISEARCH_DATABASE_URL", f"sqlite:///{(tmp_path / 'mcp.db').as_posix()}"
-    )
+    monkeypatch.setenv("OMNISEARCH_DATABASE_URL", f"sqlite:///{(tmp_path / 'mcp.db').as_posix()}")
     monkeypatch.setenv("OMNISEARCH_RUNTIME_DIR", str(tmp_path / "runtime"))
-    monkeypatch.setenv(
-        "OMNISEARCH_CHROME_USER_DATA_DIR", str(tmp_path / "chrome-profile")
-    )
+    monkeypatch.setenv("OMNISEARCH_CHROME_USER_DATA_DIR", str(tmp_path / "chrome-profile"))
     monkeypatch.setenv("OMNISEARCH_EGO_SCRIPT_DIR", str(tmp_path / "ego-scripts"))
     get_settings.cache_clear()
     server._runtime = None
@@ -46,16 +42,14 @@ async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
             "evaluate_search_quality",
         } <= names
         research_tool = next(tool for tool in listed.tools if tool.name == "research_start")
-        assert {"sub_questions", "queries"} <= set(
-            research_tool.input_schema["properties"]
-        )
+        assert {"sub_questions", "queries"} <= set(research_tool.input_schema["properties"])
         result = await client.call_tool("list_sources", {})
         source_ids = {item["source_id"] for item in result.structured_content["result"]}
         assert {"google", "duckduckgo", "github", "arxiv", "crossref", "openalex"} <= source_ids
         assert "semantic_scholar" not in source_ids
         assert "reddit" not in source_ids
         assert "x" not in source_ids
-        assert "youtube" not in source_ids
+        assert "youtube" in source_ids
 
     assert server._runtime is not None
     server._runtime.close()
@@ -109,9 +103,10 @@ def test_agent_can_supply_complete_research_plan(tmp_path, monkeypatch) -> None:
         assert len(plan.sub_questions) == 2
         assert plan.sub_questions[1].depends_on == [plan.sub_questions[0].id]
         assert plan.queries[0].sources[:2] == ["arxiv", "core"]
-        assert {
-            item.value for item in engine.research.planner.channel_coverage(plan)
-        } == {"api", "browser"}
+        assert {item.value for item in engine.research.planner.channel_coverage(plan)} == {
+            "api",
+            "browser",
+        }
         task = engine.coordinator.create(
             ResearchCreate(
                 question=plan.question,

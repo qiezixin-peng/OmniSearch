@@ -8,6 +8,8 @@ Reliability classes exposed by `list_sources`:
 - `public_api`: an official or source-operated public API. This is the stable core, but it is
   still rate-limited and monitored.
 - `credentialed_api`: an official API that is usable only after its key/token is configured.
+- `source_client`: a maintained, source-specific client that talks directly to the source but is
+  not an official public API. It must retain an explicit browser fallback and telemetry.
 - `browser_best_effort`: direct browser discovery. It is useful and retained, but CAPTCHA,
   exit-IP reputation and markup changes mean it cannot honestly be guaranteed.
 
@@ -35,10 +37,10 @@ not presented as part of the active pool merely because its code exists.
 | Google Patents | Direct XHR/browser query; community patent scrapers | Keep only for patent-specific plans. Community scrapers use the same Google surface and do not remove blocking risk. |
 | Stack Exchange | Official API; `StackAPI` is the mature wrapper | Keep as stable community API. |
 | Hacker News | Algolia HN Search API | Keep as the search path. The Firebase HN API is useful for item retrieval but is not a full-text search replacement. |
-| Reddit | PRAW + Reddit OAuth is the maintainable API path | Browser-only access is not auto-selected because real diagnostics were poor. Keep explicit browser access for logged-in/private-context research; enable automatic use only after OAuth is configured. |
+| Reddit | PRAW + Reddit OAuth | PRAW is implemented as the primary adapter. Reddit enters the automatic pool only when the free OAuth application credentials are configured; direct browser search remains a reported fallback. |
 | X | Official X API is the stable path but requires paid/credentialed access | Do not auto-select while the project is configured for no paid providers. Browser search remains explicit best-effort only. |
 | Bluesky | Public AT Protocol/AppView API; `atproto` is the maintained SDK | Keep as a stable public social source. |
-| YouTube | Official Data API v3 is the stable search path | Do not auto-select without a key. Browser search remains explicit for video-specific work. |
+| YouTube | Official Data API v3 when configured; `yt-dlp` YouTube search extractor otherwise | Keep enabled. The no-key `yt-dlp` source client is primary and the browser is a reported fallback; an official key takes precedence when later configured. |
 | RSSHub | Self-hosted RSSHub | Keep as a local specialist service. Stability is route-specific; it is not a general web-search replacement. |
 | Internet Archive | Official Advanced Search API; `internetarchive` is the maintained client | Keep as the stable historical/archive source. |
 

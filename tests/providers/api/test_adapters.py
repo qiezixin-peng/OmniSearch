@@ -18,17 +18,77 @@ from omnisearch.providers.api import (
     HuggingFaceAdapter,
     InternetArchiveAdapter,
     OpenAlexAdapter,
+    PrawRedditAdapter,
     RedditAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
     XSearchAdapter,
     YouTubeAdapter,
+    YtDlpYouTubeAdapter,
 )
 from omnisearch.providers.base import ProviderAdapter
 
 
 def request() -> SearchRequest:
     return SearchRequest(query_id=uuid4(), query="audio watermark", max_results=5)
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_youtube_search_normalization(monkeypatch) -> None:
+    adapter = YtDlpYouTubeAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "_extract_search",
+        lambda query, limit: {
+            "entries": [
+                {
+                    "id": "video-1",
+                    "title": "Watermark technical talk",
+                    "channel": "Research Lab",
+                    "channel_id": "channel-1",
+                    "description": "First-party explanation",
+                    "timestamp": 1_700_000_000,
+                }
+            ]
+        },
+    )
+
+    results = [item async for item in adapter.search(request())]
+
+    assert results[0].adapter_id == "youtube_yt_dlp"
+    assert str(results[0].url) == "https://www.youtube.com/watch?v=video-1"
+    assert results[0].authors == ["Research Lab"]
+
+
+@pytest.mark.asyncio
+async def test_praw_reddit_search_normalization() -> None:
+    class Submission:
+        permalink = "/r/audio/comments/post-1/watermark_research/"
+        name = "t3_post-1"
+        title = "Watermark research"
+        selftext = "Detailed experiment"
+        created_utc = 1_700_000_000
+        author = "researcher"
+        subreddit = "audio"
+        score = 42
+        num_comments = 7
+
+    class Listing:
+        def search(self, query, **kwargs):
+            assert query == "audio watermark"
+            assert kwargs["sort"] == "relevance"
+            return [Submission()]
+
+    class Reddit:
+        def subreddit(self, name):
+            assert name == "all"
+            return Listing()
+
+    adapter = PrawRedditAdapter(reddit=Reddit())
+    results = [item async for item in adapter.search(request())]
+
+    assert results[0].adapter_id == "reddit_praw"
+    assert results[0].external_identifiers == {"reddit_post_id": "t3_post-1"}
 
 
 @pytest.mark.asyncio
@@ -262,9 +322,7 @@ async def test_core_normalizes_structured_language_and_mixed_authors() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         results = [
             item
-            async for item in CoreAdapter(api_key="test-key", client=client).search(
-                limited_request
-            )
+            async for item in CoreAdapter(api_key="test-key", client=client).search(limited_request)
         ]
     assert len(results) == 1
     assert results[0].original_language == "en"
@@ -460,9 +518,7 @@ async def test_x_youtube_and_huggingface_normalization() -> None:
                 }
             ]
         },
-        "huggingface.co": [
-            {"modelId": "lab/watermark-detector", "downloads": 50, "likes": 3}
-        ],
+        "huggingface.co": [{"modelId": "lab/watermark-detector", "downloads": 50, "likes": 3}],
     }
 
     async def handler(incoming: httpx.Request) -> httpx.Response:
@@ -473,13 +529,10 @@ async def test_x_youtube_and_huggingface_normalization() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         x_results = [
             item
-            async for item in XSearchAdapter(
-                bearer_token="token", client=client
-            ).search(request())
+            async for item in XSearchAdapter(bearer_token="token", client=client).search(request())
         ]
         youtube_results = [
-            item
-            async for item in YouTubeAdapter(api_key="key", client=client).search(request())
+            item async for item in YouTubeAdapter(api_key="key", client=client).search(request())
         ]
         huggingface_results = [
             item async for item in HuggingFaceAdapter(client=client).search(request())

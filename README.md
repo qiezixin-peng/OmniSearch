@@ -66,6 +66,9 @@ Camoufox仍作为独立内核灾备保留。
 “可用”。每个渠道对应的官方 API、专用项目、保留/禁用决定见
 [逐渠道稳定性策略](docs/provider-stability.md)。
 
+YouTube 在没有 Data API 密钥时使用维护活跃的 `yt-dlp` 搜索提取器；Reddit 使用 PRAW，
+并且只有配置 Reddit OAuth 应用凭证后才进入自动选源。
+
 默认搜索池已登记 Google、DuckDuckGo、Brave、GitHub、arXiv、Crossref、OpenAlex、
 Semantic Scholar、Google Scholar、Stack Exchange、Reddit、GitLab、CORE、RSSHub 和 Google
 Patents。搜索规划器按子问题类别选择多个独立来源，详情见

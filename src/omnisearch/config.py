@@ -18,14 +18,16 @@ class Settings(BaseSettings):
     brave_search_api_key: SecretStr | None = None
     openalex_api_key: SecretStr | None = None
     semantic_scholar_api_key: SecretStr | None = None
+    reddit_client_id: SecretStr | None = None
+    reddit_client_secret: SecretStr | None = None
+    reddit_user_agent: str = "OmniSearch/0.1 by qiezixin-peng"
     gitlab_token: SecretStr | None = None
     core_api_key: SecretStr | None = None
     x_bearer_token: SecretStr | None = None
     youtube_api_key: SecretStr | None = None
     rsshub_base_url: str = "http://127.0.0.1:1200"
     rsshub_routes: str = (
-        "/google/news/Top%20stories/hl=en-US&gl=US&ceid=US:en,"
-        "/reuters/world,/hackernews/index"
+        "/google/news/Top%20stories/hl=en-US&gl=US&ceid=US:en,/reuters/world,/hackernews/index"
     )
     model_base_url: str | None = None
     model_name: str | None = None

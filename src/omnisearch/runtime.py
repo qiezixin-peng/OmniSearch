@@ -26,11 +26,13 @@ from omnisearch.providers.api import (
     HuggingFaceAdapter,
     InternetArchiveAdapter,
     OpenAlexAdapter,
+    PrawRedditAdapter,
     RssHubAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
     XSearchAdapter,
     YouTubeAdapter,
+    YtDlpYouTubeAdapter,
 )
 from omnisearch.providers.browser import (
     BraveBrowserAdapter,
@@ -153,6 +155,12 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         if settings.semantic_scholar_api_key
         else None
     )
+    reddit_client_id = (
+        settings.reddit_client_id.get_secret_value() if settings.reddit_client_id else None
+    )
+    reddit_client_secret = (
+        settings.reddit_client_secret.get_secret_value() if settings.reddit_client_secret else None
+    )
     gitlab_token = settings.gitlab_token.get_secret_value() if settings.gitlab_token else None
     core_key = settings.core_api_key.get_secret_value() if settings.core_api_key else None
     x_token = settings.x_bearer_token.get_secret_value() if settings.x_bearer_token else None
@@ -179,14 +187,28 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     youtube_browser = YouTubeBrowserAdapter(
         **browser_adapter_options,
     )
+    youtube_source_client = YtDlpYouTubeAdapter(fallback=youtube_browser)
     youtube_adapter = (
-        YouTubeAdapter(api_key=youtube_key, fallback=youtube_browser)
+        YouTubeAdapter(api_key=youtube_key, fallback=youtube_source_client)
         if youtube_key
-        else youtube_browser
+        else youtube_source_client
     )
     reddit_browser = RedditBrowserAdapter(
         **browser_adapter_options,
     )
+    reddit_adapter = (
+        PrawRedditAdapter(
+            client_id=reddit_client_id,
+            client_secret=reddit_client_secret,
+            user_agent=settings.reddit_user_agent,
+            fallback=reddit_browser,
+        )
+        if reddit_client_id and reddit_client_secret
+        else reddit_browser
+    )
+    sources.get("reddit").enabled_by_default = bool(reddit_client_id and reddit_client_secret)
+    sources.get("semantic_scholar").enabled_by_default = bool(semantic_scholar_key)
+    sources.get("x").enabled_by_default = bool(x_token)
     openalex_adapter = OpenAlexAdapter(api_key=openalex_key)
     crossref_adapter = CrossrefAdapter()
     rsshub_routes = [route.strip() for route in settings.rsshub_routes.split(",") if route.strip()]
@@ -197,7 +219,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         openalex_adapter,
         StackExchangeAdapter(),
         GitLabAdapter(token=gitlab_token),
-        reddit_browser,
+        reddit_adapter,
         CoreAdapter(api_key=core_key),
         x_adapter,
         BlueskyAdapter(),

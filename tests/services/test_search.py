@@ -42,6 +42,7 @@ class FakeBrowserAdapter(FakeAdapter):
             channel=Channel.BROWSER,
         )
 
+
 def paper(source: str, url: str) -> SearchResult:
     return SearchResult(
         source_id=source,
@@ -166,9 +167,7 @@ async def test_slow_source_is_bounded_by_channel_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_health_reports_recent_circuit_failure() -> None:
-    adapter = FakeAdapter(
-        "arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)
-    )
+    adapter = FakeAdapter("arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True))
     service = MultiSourceSearchService([adapter])
 
     await service.search(QuickSearchCommand(query="paper", sources=["arxiv"]))
@@ -288,9 +287,7 @@ async def test_live_failure_can_recover_exact_query_from_persisted_cache() -> No
         ),
     )
 
-    response = await service.search(
-        QuickSearchCommand(query="exact query", sources=["google"])
-    )
+    response = await service.search(QuickSearchCommand(query="exact query", sources=["google"]))
 
     assert len(response.results) == 1
     assert response.failures[0].code == "STALE_CACHE_USED"
@@ -333,9 +330,7 @@ async def test_degraded_browser_still_probes_live_before_persisted_fallback() ->
 @pytest.mark.asyncio
 async def test_records_success_failure_and_circuit_skip() -> None:
     events: list[dict] = []
-    adapter = FakeAdapter(
-        "arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)
-    )
+    adapter = FakeAdapter("arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True))
     service = MultiSourceSearchService([adapter], attempt_recorder=events.append)
 
     await service.search(QuickSearchCommand(query="first", sources=["arxiv"]))
@@ -378,6 +373,27 @@ async def test_recovered_fallback_is_not_counted_as_primary_success_and_is_cache
     assert first.failures[0].code == "FALLBACK_USED"
     assert second.failures[0].code == "FALLBACK_USED"
     assert events[0]["outcome"] == "recovered"
+    health = (await service.health())[0]
+    assert health.status == "degraded"
+    assert health.last_failure_code == "FALLBACK_USED"
+
+
+@pytest.mark.asyncio
+async def test_index_fallback_without_attempt_list_is_reported() -> None:
+    adapter = FakeAdapter("google_scholar", [paper("crossref", "https://doi.org/10.1/x")])
+    adapter.results[0].raw_payload = {
+        "fallback_used": True,
+        "fallback_path": "crossref_live_academic_index",
+        "scholar_failure_code": "ACCESS_DENIED",
+    }
+    service = MultiSourceSearchService([adapter])
+
+    response = await service.search(
+        QuickSearchCommand(query="watermark", sources=["google_scholar"])
+    )
+
+    assert response.failures[0].code == "FALLBACK_USED"
+    assert "crossref_live_academic_index: ACCESS_DENIED" in response.failures[0].message
 
 
 @pytest.mark.asyncio

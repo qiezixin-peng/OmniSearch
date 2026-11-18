@@ -298,12 +298,12 @@ def default_sources() -> list[SourceDefinition]:
             1,
             _adapter(
                 "reddit",
-                "reddit_api",
+                "reddit_praw",
                 community,
                 Channel.API,
-                backend="reddit",
+                backend="praw",
                 capabilities={"post", "comment", "community"},
-                credentials=False,
+                credentials=True,
                 date_filter=True,
             ),
             _adapter(
@@ -472,13 +472,21 @@ def default_sources() -> list[SourceDefinition]:
             ),
             _adapter(
                 "youtube",
+                "youtube_yt_dlp",
+                web,
+                Channel.API,
+                backend="yt_dlp",
+                capabilities={"video", "channel", "first_party_statement"},
+                reliability=AdapterReliability.SOURCE_CLIENT,
+            ),
+            _adapter(
+                "youtube",
                 "youtube_browser",
                 web,
                 Channel.BROWSER,
                 backend="patchright_chrome+scrapling_chrome+camoufox+ego_browser",
                 capabilities={"video", "channel", "first_party_statement"},
             ),
-            enabled_by_default=False,
         ),
         _source(
             "bluesky",

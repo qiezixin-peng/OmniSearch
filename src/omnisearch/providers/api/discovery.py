@@ -1,8 +1,12 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
+
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from omnisearch.domain.enums import Channel, SourceCategory
 from omnisearch.domain.models import ProviderCapabilities, SearchRequest, SearchResult
@@ -459,6 +463,96 @@ class InternetArchiveAdapter(HttpProvider, ProviderAdapter):
                 external_identifiers={"internet_archive": identifier},
                 raw_payload={"media_type": item.get("mediatype")},
             )
+
+
+class YtDlpYouTubeAdapter(ProviderAdapter):
+    """No-key YouTube search using yt-dlp's maintained source extractor."""
+
+    min_interval_seconds = 1.0
+
+    def __init__(self, *, fallback: ProviderAdapter | None = None) -> None:
+        self.fallback = fallback
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            source_id="youtube",
+            adapter_id="youtube_yt_dlp",
+            category=SourceCategory.WEB,
+            channel=Channel.API,
+            supported_languages={"*"},
+            search_capabilities={"video", "channel", "first_party_statement"},
+            supports_pagination=False,
+            supports_date_filter=False,
+            max_concurrency=1,
+            backend="yt_dlp",
+        )
+
+    async def search(self, request: SearchRequest) -> AsyncIterator[SearchResult]:
+        try:
+            payload = await asyncio.to_thread(
+                self._extract_search, request.query, request.max_results
+            )
+        except (DownloadError, OSError, RuntimeError) as error:
+            if self.fallback is None:
+                raise ProviderError("SOURCE_CLIENT_ERROR", str(error), retryable=True) from error
+            async for result in self.fallback.search(request):
+                result.raw_payload["api_fallback_reason"] = "SOURCE_CLIENT_ERROR"
+                result.raw_payload["source_client_error"] = str(error)[:500]
+                yield result
+            return
+
+        for item in (payload.get("entries") or [])[: request.max_results]:
+            if not isinstance(item, dict):
+                continue
+            video_id = item.get("id")
+            title = item.get("title")
+            if not video_id or not title:
+                continue
+            timestamp = item.get("timestamp")
+            published_at = (
+                datetime.fromtimestamp(timestamp, UTC)
+                if isinstance(timestamp, int | float)
+                else None
+            )
+            yield SearchResult(
+                source_id="youtube",
+                adapter_id="youtube_yt_dlp",
+                channel=Channel.API,
+                result_type="video",
+                title=title,
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                original_language=item.get("language"),
+                snippet=item.get("description"),
+                published_at=published_at,
+                authors=[item.get("channel") or item.get("uploader") or ""],
+                external_identifiers={"youtube_video_id": video_id},
+                raw_payload={
+                    "channel_id": item.get("channel_id"),
+                    "duration": item.get("duration"),
+                    "view_count": item.get("view_count"),
+                    "availability": item.get("availability"),
+                },
+            )
+
+    @staticmethod
+    def _extract_search(query: str, limit: int) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "ignoreerrors": True,
+            "socket_timeout": 10,
+            "retries": 1,
+            "extractor_retries": 1,
+            "playlistend": limit,
+        }
+        with YoutubeDL(options) as downloader:
+            payload = downloader.extract_info(f"ytsearch{limit}:{query}", download=False)
+        if not isinstance(payload, dict):
+            raise RuntimeError("yt-dlp returned an unexpected search response")
+        return payload
 
 
 class YouTubeAdapter(HttpProvider, ProviderAdapter):

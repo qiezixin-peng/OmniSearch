@@ -136,9 +136,7 @@ class MultiSourceSearchService:
             if adapter is None:
                 continue
             failures = int(item.get("failed_attempts", 0))
-            completions = int(item.get("successes", 0)) + int(
-                item.get("recovered_attempts", 0)
-            )
+            completions = int(item.get("successes", 0)) + int(item.get("recovered_attempts", 0))
             if adapter.capabilities.channel is Channel.BROWSER:
                 # A changed proxy or browser session may recover immediately;
                 # durable browser failures must never suppress a live probe.
@@ -190,7 +188,8 @@ class MultiSourceSearchService:
     @staticmethod
     def _is_configured(adapter: ProviderAdapter) -> bool:
         return not adapter.capabilities.requires_credentials or any(
-            bool(getattr(adapter, name, None)) for name in ("api_key", "token", "bearer_token")
+            bool(getattr(adapter, name, None))
+            for name in ("api_key", "token", "bearer_token", "client_id")
         )
 
     async def health(self) -> list[SourceHealth]:
@@ -316,9 +315,7 @@ class MultiSourceSearchService:
     ) -> tuple[list[SearchResult], SourceFailure | None]:
         if adapter.capabilities.channel is Channel.BROWSER:
             async with self._browser_semaphore:
-                return await self._search_uncached_bounded(
-                    source_id, command, adapter
-                )
+                return await self._search_uncached_bounded(source_id, command, adapter)
         return await self._search_uncached_bounded(source_id, command, adapter)
 
     async def _search_uncached_bounded(
@@ -395,13 +392,13 @@ class MultiSourceSearchService:
                     )
                     async with asyncio.timeout(timeout):
                         records = [item async for item in adapter.search(request)]
-                state.consecutive_failures = 0
-                state.open_until = 0.0
-                state.last_failure_code = None
-                state.last_error = None
-                state.last_success_at = datetime.now(UTC)
                 fallback_failure = self._fallback_failure(records, adapter)
                 if fallback_failure is not None:
+                    state.consecutive_failures = 1
+                    state.open_until = 0.0
+                    state.last_failure_code = fallback_failure.code
+                    state.last_error = fallback_failure.message
+                    state.last_failure_at = datetime.now(UTC)
                     self._record_attempt(
                         source_id=source_id,
                         adapter_id=adapter.capabilities.adapter_id,
@@ -415,6 +412,11 @@ class MultiSourceSearchService:
                         result_count=len(records),
                     )
                     return records, fallback_failure
+                state.consecutive_failures = 0
+                state.open_until = 0.0
+                state.last_failure_code = None
+                state.last_error = None
+                state.last_success_at = datetime.now(UTC)
                 self._record_attempt(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
@@ -587,7 +589,17 @@ class MultiSourceSearchService:
             if api_reason:
                 reasons.append(f"API fallback reason: {api_reason}")
             if payload.get("fallback_used"):
-                reasons.extend(str(item) for item in payload.get("failed_attempts", []))
+                failed_attempts = [str(item) for item in payload.get("failed_attempts", [])]
+                reasons.extend(failed_attempts)
+                if not failed_attempts:
+                    fallback_path = payload.get("fallback_path", "fallback")
+                    failure_code = (
+                        payload.get("scholar_failure_code")
+                        or payload.get("api_failure_code")
+                        or payload.get("live_failure_code")
+                        or "PRIMARY_UNAVAILABLE"
+                    )
+                    reasons.append(f"{fallback_path}: {failure_code}")
         unique = list(dict.fromkeys(reasons))
         if not unique:
             return None

@@ -36,11 +36,13 @@ def test_browser_and_api_adapters_publish_distinct_reliability_classes() -> None
     assert registry.get("google").adapters[0].reliability_class is (
         AdapterReliability.BROWSER_BEST_EFFORT
     )
-    assert registry.get("crossref").adapters[0].reliability_class is (
-        AdapterReliability.PUBLIC_API
-    )
+    assert registry.get("crossref").adapters[0].reliability_class is (AdapterReliability.PUBLIC_API)
     assert registry.get("core").adapters[0].reliability_class is (
         AdapterReliability.CREDENTIALED_API
+    )
+    assert any(
+        adapter.reliability_class is AdapterReliability.SOURCE_CLIENT
+        for adapter in registry.get("youtube").adapters
     )
 
 
@@ -50,4 +52,4 @@ def test_unconfigured_or_paid_only_sources_are_not_auto_selected() -> None:
     assert "semantic_scholar" not in enabled
     assert "x" not in enabled
     assert "reddit" not in enabled
-    assert "youtube" not in enabled
+    assert "youtube" in enabled

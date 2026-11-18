@@ -94,9 +94,7 @@ class BrowserSearchAdapter(ProviderAdapter):
                                 if mode is FetchMode.CHROME_MANAGED
                                 else None
                             ),
-                            ego_task_name=(
-                                f"OmniSearch {self.source_id} {request.query_id}"
-                            ),
+                            ego_task_name=(f"OmniSearch {self.source_id} {request.query_id}"),
                             solve_cloudflare=True,
                             network_idle=False,
                             wait_selector=self.wait_selector,
@@ -208,9 +206,7 @@ class BrowserSearchAdapter(ProviderAdapter):
             (self.ego_fetcher, FetchMode.EGO_BROWSER),
         ]
         if self.preferred_backends:
-            priorities = {
-                backend: index for index, backend in enumerate(self.preferred_backends)
-            }
+            priorities = {backend: index for index, backend in enumerate(self.preferred_backends)}
             return sorted(
                 candidates,
                 key=lambda item: priorities.get(self._backend_name(*item), len(priorities)),
@@ -450,9 +446,7 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)
         records: list[dict[str, str]] = []
-        anchors = tree.cssselect(
-            '[data-testid="result-title-a"], a.result__a, a.result-link'
-        )
+        anchors = tree.cssselect('[data-testid="result-title-a"], a.result__a, a.result-link')
         for anchor in anchors:
             href = anchor.get("href", "")
             if "uddg=" in href:
@@ -480,6 +474,14 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
 class BraveBrowserAdapter(BrowserSearchAdapter):
     source_id = "brave"
     adapter_id = "brave_browser"
+    preferred_backends = (
+        "scrapling_chrome",
+        "ego_browser",
+        "patchright_chrome",
+        "camoufox",
+    )
+    max_attempts = 3
+    attempt_timeout_ms = 10_000
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
@@ -491,8 +493,8 @@ class BraveBrowserAdapter(BrowserSearchAdapter):
         records: list[dict[str, str]] = []
         selectors = (
             '[data-type="web"] a[href]',
-            '.snippet a[href]',
-            '.result a[href]',
+            ".snippet a[href]",
+            ".result a[href]",
             'a[data-testid="result-title-a"]',
         )
         anchors = []
@@ -504,9 +506,7 @@ class BraveBrowserAdapter(BrowserSearchAdapter):
             if parsed.scheme not in {"http", "https"} or parsed.netloc.endswith("brave.com"):
                 continue
             title_nodes = anchor.cssselect("h2, h3, .title")
-            title = " ".join(
-                (title_nodes[0] if title_nodes else anchor).itertext()
-            ).strip()
+            title = " ".join((title_nodes[0] if title_nodes else anchor).itertext()).strip()
             if not title:
                 continue
             container = anchor
@@ -662,8 +662,7 @@ class XBrowserAdapter(BrowserSearchAdapter):
     def _search_urls(self, request: SearchRequest) -> list[str]:
         return [
             self._search_url(request),
-            "https://duckduckgo.com/?q="
-            f"{quote_plus(request.query + ' site:x.com')}&ia=web",
+            f"https://duckduckgo.com/?q={quote_plus(request.query + ' site:x.com')}&ia=web",
             "https://www.google.com/search?q="
             f"{quote_plus(request.query + ' site:x.com/status')}&num=20",
         ]
@@ -671,9 +670,11 @@ class XBrowserAdapter(BrowserSearchAdapter):
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
         direct_url, indexed_url, google_url = self._search_urls(request)
         return [
-            *((url, fetcher, FetchMode.CHROME_MANAGED)
-              for url in (indexed_url, google_url)
-              for fetcher in self.browser_fetchers),
+            *(
+                (url, fetcher, FetchMode.CHROME_MANAGED)
+                for url in (indexed_url, google_url)
+                for fetcher in self.browser_fetchers
+            ),
             (direct_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
             (indexed_url, self.ego_fetcher, FetchMode.EGO_BROWSER),
             (google_url, self.ego_fetcher, FetchMode.EGO_BROWSER),

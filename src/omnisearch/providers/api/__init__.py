@@ -9,11 +9,13 @@ from omnisearch.providers.api.discovery import (
     InternetArchiveAdapter,
     XSearchAdapter,
     YouTubeAdapter,
+    YtDlpYouTubeAdapter,
 )
 from omnisearch.providers.api.github import GitHubSearchAdapter
 from omnisearch.providers.api.more import (
     CoreAdapter,
     GitLabAdapter,
+    PrawRedditAdapter,
     RedditAdapter,
     SemanticScholarAdapter,
     StackExchangeAdapter,
@@ -34,10 +36,12 @@ __all__ = [
     "HuggingFaceAdapter",
     "InternetArchiveAdapter",
     "OpenAlexAdapter",
+    "PrawRedditAdapter",
     "RedditAdapter",
     "RssHubAdapter",
     "SemanticScholarAdapter",
     "StackExchangeAdapter",
     "XSearchAdapter",
+    "YtDlpYouTubeAdapter",
     "YouTubeAdapter",
 ]
