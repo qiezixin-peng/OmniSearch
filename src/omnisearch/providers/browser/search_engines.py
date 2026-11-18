@@ -490,6 +490,8 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
         "camoufox",
     )
     max_attempts = 4
+    attempt_timeout_ms = 12_000
+    wait_selector = 'a[data-testid="post-title-text"], a[href*="/comments/"]'
 
     def _search_urls(self, request: SearchRequest) -> list[str]:
         query = quote_plus(request.query)
@@ -501,7 +503,10 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
         ]
 
     def _attempts(self, request: SearchRequest) -> list[tuple[str, ContentFetcher, FetchMode]]:
-        attempts: list[tuple[str, ContentFetcher, FetchMode]] = []
+        direct_url = self._search_urls(request)[2]
+        attempts: list[tuple[str, ContentFetcher, FetchMode]] = [
+            (direct_url, self.ego_fetcher, FetchMode.EGO_BROWSER)
+        ]
         scrapling = next(
             (
                 fetcher
@@ -512,7 +517,9 @@ class RedditBrowserAdapter(BrowserSearchAdapter):
         )
         if scrapling is not None:
             attempts.append((self._search_urls(request)[1], scrapling, FetchMode.HTTP))
-        attempts.extend(super()._attempts(request))
+        attempts.extend(
+            attempt for attempt in super()._attempts(request) if attempt not in attempts
+        )
         return attempts[: self.max_attempts]
 
     def _search_url(self, request: SearchRequest) -> str:
