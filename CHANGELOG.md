@@ -6,6 +6,10 @@
 
 ### Changed
 
+- 全局研究入口升级为 OmniSearch 与 Agent 内置网页搜索双路径；新增
+  `merge_search_results` MCP 工具，按稳定标识和规范化 URL 去重，并保留引擎与查询发现
+  轨迹供 Agent 复核语义近重复项。
+
 - Windows 原生运行脚本升级为逐组件 Supervisor，使用真实 API、MCP 协议、Worker 心跳和
   RSSHub 健康检查恢复异常进程；
 - 进程停止与重启改为追踪完整进程树，避免虚拟环境启动器 PID 与实际 Python 进程不一致；

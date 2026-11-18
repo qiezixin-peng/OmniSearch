@@ -6,17 +6,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from mcp.server.mcpserver import MCPServer
-from pydantic import Field
+from pydantic import Field, HttpUrl
 
 from omnisearch.core.evidence import EvidenceEvaluator, EvidenceItem
 from omnisearch.core.planning import PlannedQuery, PlannedSubQuestion, ResearchPlan
-from omnisearch.domain.enums import ResearchStatus, SourceCategory
-from omnisearch.domain.models import ResearchBudget, ResearchCreate, StrictModel
+from omnisearch.domain.enums import Channel, ResearchStatus, SourceCategory
+from omnisearch.domain.models import ResearchBudget, ResearchCreate, SearchResult, StrictModel
 from omnisearch.quality.metrics import evaluate_quality
 from omnisearch.runtime import OmniRuntime, build_runtime
 from omnisearch.services.acquisition import AcquisitionRequest
 from omnisearch.services.crawl import CrawlRequest
-from omnisearch.services.search import QuickSearchCommand
+from omnisearch.services.search import MultiSourceSearchService, QuickSearchCommand
 from omnisearch.workers import ResearchWorker
 
 mcp = MCPServer(
@@ -26,7 +26,9 @@ mcp = MCPServer(
     instructions=(
         "Use search for a fast lookup. For complex questions, the calling Agent must decompose "
         "the problem, create multilingual queries, and call research_start. Research plans use "
-        "both API providers and direct browser search by default. Poll research_status, retrieve "
+        "both API providers and direct browser search by default. When the Agent runtime has its "
+        "own web search, run both discovery paths and use merge_search_results before synthesis. "
+        "Poll research_status, retrieve "
         "research_get_result and get_evidence, then synthesize a cited answer with conflicts and "
         "unresolved gaps; never dump raw search results as the final answer."
     ),
@@ -50,6 +52,20 @@ class AgentPlannedQuery(StrictModel):
     query: str = Field(min_length=1, max_length=2000)
     sources: list[str] = Field(min_length=1)
     purpose: str = Field(default="agent-supplied research query", max_length=1000)
+
+
+class AgentDiscoveryResult(StrictModel):
+    """One flattened discovery from OmniSearch or the calling Agent's web search."""
+
+    discovery_path: str = Field(pattern=r"^(omnisearch|agent_builtin)$")
+    source_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=2000)
+    url: HttpUrl
+    query: str | None = Field(default=None, max_length=2000)
+    snippet: str | None = None
+    result_type: str = Field(default="web", min_length=1, max_length=80)
+    language: str | None = Field(default=None, max_length=35)
+    external_identifiers: dict[str, str] = Field(default_factory=dict)
 
 
 def _build_agent_plan(
@@ -236,6 +252,67 @@ async def search_sources(
     if not sources:
         raise ValueError("at least one source is required")
     return await search(query, sources, language, max_results_per_source)
+
+
+@mcp.tool(
+    description=(
+        "Merge flattened OmniSearch and Agent built-in web-search discoveries. Deduplicates by "
+        "stable identifiers and canonical URL while preserving every discovery path and query."
+    )
+)
+def merge_search_results(results: list[AgentDiscoveryResult]) -> dict[str, Any]:
+    if not 1 <= len(results) <= 500:
+        raise ValueError("results must contain between 1 and 500 items")
+    records = [
+        SearchResult(
+            source_id=item.source_id,
+            adapter_id=f"{item.discovery_path}_import",
+            channel=Channel.BROWSER,
+            result_type=item.result_type,
+            title=item.title,
+            url=item.url,
+            original_language=item.language,
+            snippet=item.snippet,
+            external_identifiers=item.external_identifiers,
+            raw_payload={
+                "discovery_path": item.discovery_path,
+                "query": item.query,
+            },
+        )
+        for item in results
+    ]
+    merged = MultiSourceSearchService.merge_records(records)
+    return {
+        "input_count": len(records),
+        "unique_count": len(merged),
+        "duplicates_removed": len(records) - len(merged),
+        "results": [
+            {
+                "canonical_key": item.canonical_key,
+                "primary": item.primary.model_dump(mode="json"),
+                "occurrences": [record.model_dump(mode="json") for record in item.occurrences],
+                "discovery_paths": list(
+                    dict.fromkeys(
+                        str(record.raw_payload.get("discovery_path", "unknown"))
+                        for record in item.occurrences
+                    )
+                ),
+                "queries": list(
+                    dict.fromkeys(
+                        str(record.raw_payload["query"])
+                        for record in item.occurrences
+                        if record.raw_payload.get("query")
+                    )
+                ),
+            }
+            for item in merged
+        ],
+        "agent_next_action": (
+            "Review only high-confidence semantic/title near-duplicates that remain, then "
+            "synthesize the answer without counting repeated discovery of one document as "
+            "independent evidence."
+        ),
+    }
 
 
 @mcp.tool(

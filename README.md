@@ -192,6 +192,7 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 默认保留全部权利。第三方依赖和浏览器组件继续适用各自的许可证与使用条款。
 
 核心工具包括 `search`、`search_batch`、`search_sources`、`research_start`、
+`merge_search_results`、
 `research_status`、`research_continue`、`research_cancel`、`research_get_result`、`fetch_page`、
 `fetch_batch`、`crawl_site`、`get_document`、`search_documents`、`get_evidence`、
 `verify_claim`、`list_sources`
@@ -201,6 +202,12 @@ omnisearch-mcp --transport streamable-http --host 127.0.0.1 --port 8010
 使用 Agent 自定义的短 `key` 建立依赖，查询显式指定语言、搜索表达、来源和目的；服务端
 将其映射为持久化 UUID 并校验预算及 Provider 配置。若 Agent 只传入 `question`，系统才
 使用确定性的启发式拆解兜底，不要求连接任何外部模型。
+
+调用 Agent 自身具备内置网页搜索时，全局策略要求它与 OmniSearch 同时检索。内置搜索仍
+属于 Agent 编排层，不会被伪装为本服务的 Google Provider。Agent 将两路发现展平后可调用
+`merge_search_results`：服务按 DOI、arXiv ID、仓库/专利标识和规范化 URL 确定性去重，
+同时保留发现路径与查询轨迹；标题或正文语义近似但缺少稳定标识的候选由 Agent 在综合前
+复核，避免把独立原始来源误删。
 
 无论计划由 Agent 提交还是由启发式生成，深度研究都会校验整体通道覆盖：至少包含一个
 真实 API Provider 和一个浏览器直接搜索 Provider。缺少一侧时系统会按子问题类别自动补入

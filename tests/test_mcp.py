@@ -24,6 +24,7 @@ async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
             "search",
             "search_batch",
             "search_sources",
+            "merge_search_results",
             "research_start",
             "research_continue",
             "research_cancel",
@@ -56,6 +57,43 @@ async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
     server._runtime = None
 
 
+@pytest.mark.asyncio
+async def test_mcp_merges_agent_and_omnisearch_discoveries() -> None:
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "merge_search_results",
+            {
+                "results": [
+                    {
+                        "discovery_path": "omnisearch",
+                        "source_id": "crossref",
+                        "title": "A shared paper",
+                        "url": "https://doi.org/10.1000/example?utm_source=omni",
+                        "query": "shared paper",
+                        "external_identifiers": {"doi": "10.1000/example"},
+                    },
+                    {
+                        "discovery_path": "agent_builtin",
+                        "source_id": "openai_web_search",
+                        "title": "A shared paper",
+                        "url": "https://publisher.example/paper",
+                        "query": "shared paper publication",
+                        "external_identifiers": {"doi": "10.1000/example"},
+                    },
+                ]
+            },
+        )
+        payload = result.structured_content
+        assert payload["input_count"] == 2
+        assert payload["unique_count"] == 1
+        assert payload["duplicates_removed"] == 1
+        assert payload["results"][0]["discovery_paths"] == [
+            "omnisearch",
+            "agent_builtin",
+        ]
+        assert len(payload["results"][0]["queries"]) == 2
+
+
 def test_agent_can_supply_complete_research_plan(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(
         "OMNISEARCH_DATABASE_URL", f"sqlite:///{(tmp_path / 'agent-plan.db').as_posix()}"
@@ -83,7 +121,7 @@ def test_agent_can_supply_complete_research_plan(tmp_path, monkeypatch) -> None:
                 sub_question_key="principle",
                 language="en",
                 query="audio watermark mechanism paper",
-                sources=["arxiv", "core"],
+                sources=["arxiv", "crossref"],
             ),
             server.AgentPlannedQuery(
                 sub_question_key="implementation",
@@ -102,7 +140,7 @@ def test_agent_can_supply_complete_research_plan(tmp_path, monkeypatch) -> None:
         )
         assert len(plan.sub_questions) == 2
         assert plan.sub_questions[1].depends_on == [plan.sub_questions[0].id]
-        assert plan.queries[0].sources[:2] == ["arxiv", "core"]
+        assert plan.queries[0].sources[:2] == ["arxiv", "crossref"]
         assert {item.value for item in engine.research.planner.channel_coverage(plan)} == {
             "api",
             "browser",

@@ -245,7 +245,7 @@ class MultiSourceSearchService:
                 failures.append(failure)
         return QuickSearchResponse(
             query=command.query,
-            results=self._merge(records),
+            results=self.merge_records(records),
             failures=failures,
         )
 
@@ -651,7 +651,8 @@ class MultiSourceSearchService:
             return
 
     @classmethod
-    def _merge(cls, records: list[SearchResult]) -> list[MergedSearchResult]:
+    def merge_records(cls, records: list[SearchResult]) -> list[MergedSearchResult]:
+        """Merge provider or Agent-supplied discoveries without losing provenance."""
         buckets: dict[str, list[SearchResult]] = {}
         order: list[str] = []
         for record in records:
@@ -668,6 +669,9 @@ class MultiSourceSearchService:
             )
             for key in order
         ]
+
+    # Retained for compatibility with existing integrations and tests.
+    _merge = merge_records
 
     @staticmethod
     def _canonical_key(record: SearchResult) -> str:
