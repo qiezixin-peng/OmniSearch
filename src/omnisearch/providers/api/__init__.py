@@ -1,5 +1,6 @@
 from omnisearch.providers.api.academic import ArxivAdapter, CrossrefAdapter, OpenAlexAdapter
 from omnisearch.providers.api.brave import BraveSearchAdapter
+from omnisearch.providers.api.ddgs import DDGSFederatedAdapter
 from omnisearch.providers.api.discovery import (
     BlueskyAdapter,
     EuropePmcAdapter,
@@ -26,6 +27,7 @@ __all__ = [
     "BlueskyAdapter",
     "CrossrefAdapter",
     "CoreAdapter",
+    "DDGSFederatedAdapter",
     "EuropePmcAdapter",
     "GdeltAdapter",
     "GitLabAdapter",

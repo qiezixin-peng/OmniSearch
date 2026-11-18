@@ -13,6 +13,7 @@ def test_default_pool_contains_required_sources() -> None:
         "crossref",
         "openalex",
         "brave",
+        "ddgs",
     } <= source_ids
 
 

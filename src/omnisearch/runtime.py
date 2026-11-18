@@ -19,6 +19,7 @@ from omnisearch.providers.api import (
     BraveSearchAdapter,
     CoreAdapter,
     CrossrefAdapter,
+    DDGSFederatedAdapter,
     EuropePmcAdapter,
     GitHubSearchAdapter,
     GitLabAdapter,
@@ -192,6 +193,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     rsshub_routes = [route.strip() for route in settings.rsshub_routes.split(",") if route.strip()]
     search = MultiSourceSearchService(
         [
+            *([DDGSFederatedAdapter()] if settings.ddgs_enabled else []),
             GitHubSearchAdapter(token=github_token),
             ArxivAdapter(index_fallback=openalex_adapter),
             crossref_adapter,

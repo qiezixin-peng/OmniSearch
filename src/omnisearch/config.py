@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     camoufox_enabled: bool = True
     camoufox_python: Path = Path(".venv-camoufox312/Scripts/python.exe")
     sticky_proxy_enabled: bool = True
+    # DDGS is useful for experimentation but its released engine set and
+    # upstream availability are not yet stable enough for automatic research.
+    ddgs_enabled: bool = False
     sticky_proxy_port: int = Field(default=17897, ge=1024, le=65535)
     sticky_proxy_controller_port: int = Field(default=19097, ge=1024, le=65535)
     clash_verge_config_dir: Path = Path(

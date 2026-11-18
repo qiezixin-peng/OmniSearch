@@ -7,8 +7,8 @@
 | 优先级 | 来源 | 类别 | 首选通道 | 备用通道 |
 |---|---|---|---|---|
 | P0 | Brave Search | 综合网页 | API | — |
-| P0 | Google Search | 综合网页 | Patchright Chrome | Scrapling / ego-browser / Camoufox |
-| P0 | DuckDuckGo | 综合网页 | Patchright Chrome | Scrapling / Camoufox / ego-browser |
+| P0 | Google Search | 综合网页 | ego-browser | 独立代理托管 Chrome |
+| P0 | DuckDuckGo | 综合网页 | Scrapling HTTP（Lite） | ego-browser / 托管 Chrome |
 | P0 | GitHub | 代码 | REST API | ego-browser |
 | P0 | arXiv | 学术 | API | — |
 | P0 | Crossref | 学术元数据 | API | — |
@@ -28,6 +28,7 @@
 | P2 | CORE | 论文与全文 | API | — |
 | P2 | Bluesky | 开放社交网络的一手帖子 | Public AT Protocol API | — |
 | P2 | Google Patents | 专利 | Patchright Chrome | Scrapling / ego-browser / Camoufox |
+| P2 | DDGS（实验，默认关闭） | 免费联合网页搜索 | Startpage / Yahoo | — |
 
 P0/P1/P2 是接入和调度优先级，不等于证据等级。Google、DuckDuckGo 和 Brave 是发现
 入口，不因排名靠前就成为权威证据。论文、官方文档、原始代码、标准和专利需要在
@@ -46,6 +47,8 @@ P0/P1/P2 是接入和调度优先级，不等于证据等级。Google、DuckDuck
 7. 官方域名通过搜索计划的 domain filter 定向查找，不建立一份永远不变的官方站点表；
 8. Provider 的健康、限流、凭据和历史成功率参与实际选择；
 9. 查询、命中记录和标准化资料分开持久化，允许一个结果被多个来源发现。
+10. DDGS 已完成适配，但发布包的引擎集合与主分支文档存在差异，且本机连续测试未达到
+    稳定性门槛；只有显式设置 `OMNISEARCH_DDGS_ENABLED=true` 才会进入运行时搜索池。
 
 Agent 可以通过 `GET /v1/sources` 或 MCP `list_sources` 查看当前搜索池，通过类别和通道筛选；MCP
 `list_sources` 工具将复用同一个注册中心。
