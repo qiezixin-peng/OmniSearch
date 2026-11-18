@@ -119,6 +119,11 @@ API 与 RSSHub 使用 HTTP 健康端点，MCP 执行真实 JSON-RPC `initialize`
 静默退出，服务异常时等待自动恢复。Hook 是会话级补充，Windows Supervisor 仍是独立于
 Agent 的主运行保障。
 
+全局 `PostToolUse` Hook 只检查本轮实际调用的 OmniSearch 工具结果。全部路径正常时不输出
+任何提示；如果某个 API、浏览器、Provider、采集步骤或研究质量门失败，它会把来源、错误码
+和影响要求注入当前轮，调用 Agent 必须在对话中以“搜索状态”说明失败路径、回退情况和覆盖
+影响。未被当前任务选择的 Provider 不会产生无关告警。
+
 Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright
 环境相互隔离，避免版本依赖冲突。
 

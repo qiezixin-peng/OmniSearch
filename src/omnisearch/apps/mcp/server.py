@@ -383,6 +383,12 @@ def research_get_result(research_id: str, limit: int = 100) -> dict[str, Any]:
             if merged_event
             else None
         ),
+        "retrieval_failures": (
+            merged_event.payload.get("source_failure_breakdown", []) if merged_event else []
+        ),
+        "acquisition_failures": (
+            merged_event.payload.get("acquisition_failure_details", []) if merged_event else []
+        ),
         "results": _research_records_with_evidence(engine, identifier, limit),
         "agent_next_action": (
             "Synthesize a direct answer for the user from these records; cite supporting sources, "

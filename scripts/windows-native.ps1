@@ -150,14 +150,7 @@ function Test-WorkerHealth {
         if ($Age.TotalSeconds -gt 90) {
             return $false
         }
-        $WorkerProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$Heartbeat.pid)"
-        if ($null -eq $WorkerProcess -or [string]::IsNullOrWhiteSpace($WorkerProcess.CommandLine)) {
-            return $false
-        }
-        return $WorkerProcess.CommandLine.IndexOf(
-            "omnisearch-worker.exe",
-            [StringComparison]::OrdinalIgnoreCase
-        ) -ge 0
+        return $null -ne (Get-Process -Id ([int]$Heartbeat.pid) -ErrorAction SilentlyContinue)
     }
     catch {
         return $false
@@ -175,7 +168,12 @@ function Test-ServiceHealth([hashtable]$Service) {
 }
 
 function Get-ProcessTreeIds([int]$RootPid) {
-    $AllProcesses = @(Get-CimInstance Win32_Process)
+    try {
+        $AllProcesses = @(Get-CimInstance Win32_Process)
+    }
+    catch {
+        return @($RootPid)
+    }
     $Pending = New-Object 'System.Collections.Generic.Queue[int]'
     $Found = New-Object 'System.Collections.Generic.HashSet[int]'
     $Pending.Enqueue($RootPid)
@@ -205,11 +203,20 @@ function Get-ServiceProcessIds([hashtable]$Service) {
         $Marker = $Service.Command
     }
     if (-not [string]::IsNullOrWhiteSpace($Marker)) {
-        foreach ($Process in Get-CimInstance Win32_Process) {
-            if (-not [string]::IsNullOrWhiteSpace($Process.CommandLine) -and
-                $Process.CommandLine.IndexOf($Marker, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                [void]$Ids.Add([int]$Process.ProcessId)
+        try {
+            foreach ($Process in Get-CimInstance Win32_Process) {
+                if (-not [string]::IsNullOrWhiteSpace($Process.CommandLine) -and
+                    $Process.CommandLine.IndexOf(
+                        $Marker,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0) {
+                    [void]$Ids.Add([int]$Process.ProcessId)
+                }
             }
+        }
+        catch {
+            # Restricted Agent sandboxes can deny CIM. PID and protocol health remain usable;
+            # the scheduled supervisor performs the full process-tree cleanup outside the sandbox.
         }
     }
 
@@ -366,9 +373,11 @@ function Stop-Services {
 }
 
 function Register-RuntimeTask {
+    $ConhostPath = Join-Path $env:SystemRoot "System32\conhost.exe"
+    $PowerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $TaskAction = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" Ensure -Quiet"
+        -Execute $ConhostPath `
+        -Argument "--headless `"$PowerShellPath`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$PSCommandPath`" Ensure -Quiet"
     $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $RecoveryTrigger = New-ScheduledTaskTrigger `
         -Once `

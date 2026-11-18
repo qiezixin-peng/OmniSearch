@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from omnisearch.fetchers import ContentFetcher, FetchedDocument, FetchMode, FetchRequest
+from omnisearch.fetchers import (
+    ContentFetcher,
+    FetchedDocument,
+    FetchMode,
+    FetchPolicyError,
+    FetchRequest,
+)
 from omnisearch.security import UnsafeUrlError
 from omnisearch.services.acquisition import AcquisitionRequest, DocumentAcquisitionService
 
@@ -111,3 +117,40 @@ async def test_security_policy_failure_never_falls_back_to_browser(
 
     with pytest.raises(UnsafeUrlError, match="private address"):
         await service.fetch(AcquisitionRequest(url="https://example.com/redirect"))
+
+
+@pytest.mark.asyncio
+async def test_respects_robots_txt_when_requested(tmp_path: Path, monkeypatch) -> None:
+    async def allow_url(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr("omnisearch.services.acquisition.validate_public_url", allow_url)
+    http = FakeFetcher(
+        result=FetchedDocument(
+            url="https://example.com/robots.txt",
+            final_url="https://example.com/robots.txt",
+            mode=FetchMode.HTTP,
+            status_code=200,
+            content_type="text/plain",
+            markdown="",
+            raw_html="User-agent: OmniSearch\nDisallow: /private",
+        )
+    )
+    service = DocumentAcquisitionService(
+        http,
+        FakeFetcher(error=AssertionError("robots denial must not reach Chrome")),
+        FakeFetcher(error=AssertionError("robots denial must not reach ego-browser")),
+        tmp_path,
+    )
+
+    with pytest.raises(FetchPolicyError, match="robots.txt disallows"):
+        await service.fetch(
+            AcquisitionRequest(
+                url="https://example.com/private/report",
+                respect_robots_txt=True,
+            )
+        )
+
+    assert [str(request.url) for request in http.requests] == [
+        "https://example.com/robots.txt"
+    ]

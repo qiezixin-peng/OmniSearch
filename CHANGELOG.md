@@ -11,6 +11,10 @@
 - 进程停止与重启改为追踪完整进程树，避免虚拟环境启动器 PID 与实际 Python 进程不一致；
 - 任务计划启用 `StartWhenAvailable`、互斥执行、登录启动、周期检查和失败重试；
 - 增加 Codex `SessionStart` Hook 入口，为新建、恢复、清空和 Fork 会话提供启动前保障。
+- 增加静默成功、异常显式汇报的 `PostToolUse` Hook，并在深度研究结果中返回来源与采集
+  失败明细，确保调用 Agent 向用户说明实际失效路径、回退和覆盖影响。
+- 修复 `fetch_page` 的 robots.txt 参数校验故障，并约束 OpenAlex 重试预算，使 429 能保留为
+  `RATE_LIMITED` 而不是被外层截止时间误报为超时。
 
 ## 0.1.0 — 2026-11-17
 

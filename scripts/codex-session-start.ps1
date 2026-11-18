@@ -17,5 +17,13 @@ catch {
     @{
         continue = $true
         systemMessage = $Message
+        hookSpecificOutput = @{
+            hookEventName = "SessionStart"
+            additionalContext = (
+                "OmniSearch automatic recovery failed. In this turn, the Agent must tell the user " +
+                "that the service is unavailable, why recovery failed, how internet research coverage " +
+                "is affected, and whether a fallback was used. Do not hide this failure."
+            )
+        }
     } | ConvertTo-Json -Compress
 }

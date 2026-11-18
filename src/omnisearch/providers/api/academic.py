@@ -164,7 +164,10 @@ class OpenAlexAdapter(HttpProvider, ProviderAdapter):
     def __init__(
         self, *, client: httpx.AsyncClient | None = None, api_key: str | None = None
     ) -> None:
-        super().__init__(client=client)
+        # Keep retries inside SearchService's 20-second API budget. OpenAlex can
+        # return a long Retry-After on 429; three attempts would otherwise be
+        # misreported by the outer deadline as TIMEOUT instead of RATE_LIMITED.
+        super().__init__(client=client, timeout_seconds=12.0, max_attempts=2)
         self.api_key = api_key
 
     @property

@@ -295,6 +295,12 @@ def get_research_result(
             if merged_event
             else None
         ),
+        "retrieval_failures": (
+            merged_event.payload.get("source_failure_breakdown", []) if merged_event else []
+        ),
+        "acquisition_failures": (
+            merged_event.payload.get("acquisition_failure_details", []) if merged_event else []
+        ),
         "results": results,
     }
 

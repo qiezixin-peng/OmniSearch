@@ -1,6 +1,8 @@
 import hashlib
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+from urllib.robotparser import RobotFileParser
 
 from pydantic import Field, HttpUrl
 
@@ -17,6 +19,7 @@ class AcquisitionRequest(StrictModel):
     min_content_chars: int = Field(default=100, ge=0, le=10000)
     use_browser_fallback: bool = True
     solve_cloudflare: bool = True
+    respect_robots_txt: bool = False
 
 
 class AcquiredDocument(StrictModel):
@@ -47,6 +50,7 @@ class DocumentAcquisitionService:
         self.browser_fetchers = (chrome_fetcher, *browser_fallback_fetchers)
         self.ego_fetcher = ego_fetcher
         self.chrome_profile_root = chrome_profile_root
+        self._robots_cache: dict[str, RobotFileParser | None] = {}
 
     async def fetch(self, command: AcquisitionRequest) -> AcquiredDocument:
         url = str(command.url)
@@ -57,6 +61,8 @@ class DocumentAcquisitionService:
 
     async def _fetch(self, command: AcquisitionRequest, url: str) -> AcquiredDocument:
         await validate_public_url(url)
+        if command.respect_robots_txt and not await self._can_fetch(url):
+            raise FetchPolicyError(f"robots.txt disallows OmniSearch from fetching {url}")
         if self._looks_like_pdf(url):
             return await self._fetch_pdf(command)
 
@@ -110,6 +116,36 @@ class DocumentAcquisitionService:
             except Exception as error:
                 attempts.append(f"{mode.value}: {type(error).__name__}: {error}")
         raise AcquisitionError("all acquisition modes failed; " + " | ".join(attempts))
+
+    async def _can_fetch(self, url: str) -> bool:
+        parts = urlsplit(url)
+        origin = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+        if origin not in self._robots_cache:
+            self._robots_cache[origin] = await self._load_robots(origin)
+        parser = self._robots_cache[origin]
+        return parser is None or parser.can_fetch("OmniSearch", url)
+
+    async def _load_robots(self, origin: str) -> RobotFileParser | None:
+        robots_url = f"{origin}/robots.txt"
+        try:
+            fetched = await self.http_fetcher.fetch(
+                FetchRequest(
+                    url=robots_url,
+                    mode=FetchMode.HTTP,
+                    max_bytes=1024 * 1024,
+                )
+            )
+        except Exception:
+            return None
+        parser = RobotFileParser()
+        parser.set_url(robots_url)
+        if fetched.status_code in {401, 403}:
+            parser.parse(["User-agent: *", "Disallow: /"])
+            return parser
+        if fetched.status_code >= 400 or not fetched.raw_html:
+            return None
+        parser.parse(fetched.raw_html.splitlines())
+        return parser
 
     def _fetch_chain(self, command: AcquisitionRequest):
         yield FetchMode.HTTP, self.http_fetcher
