@@ -96,7 +96,9 @@ News、Reuters、项目发布和其他站点路由的最新内容，是持续资
 
 ```powershell
 .\scripts\windows-native.ps1 Install
+.\scripts\windows-native.ps1 Register
 .\scripts\windows-native.ps1 Start
+.\scripts\windows-native.ps1 Ensure
 .\scripts\windows-native.ps1 Status
 .\scripts\windows-native.ps1 Stop
 .\scripts\windows-native.ps1 Uninstall
@@ -104,7 +106,18 @@ News、Reuters、项目发布和其他站点路由的最新内容，是持续资
 
 `Install` 会安装 Patchright、创建隔离的 Python 3.12 Camoufox 环境、下载对应浏览器，
 注册当前用户登录后的自动启动任务并立即启动服务；`Uninstall` 会停止服务并移除该任务，
-但不会删除研究数据库或已采集资料。
+但不会删除研究数据库或已采集资料。依赖已安装时可用 `Register` 只刷新任务计划；`Ensure`
+执行幂等健康检查，只修复异常组件。
+
+Windows Supervisor 在用户登录时启动，并每两分钟检查一次 API、MCP、Worker 和 RSSHub。
+API 与 RSSHub 使用 HTTP 健康端点，MCP 执行真实 JSON-RPC `initialize`，Worker 使用独立的
+进程心跳；恢复时按完整进程树清理失效实例，避免只记录虚拟环境启动器 PID 所造成的误判。
+任务启用了 `StartWhenAvailable`、单实例互斥和失败重试。
+
+`scripts/codex-session-start.ps1` 用于 Codex 全局 `SessionStart` Hook。在 `startup`、
+`resume`、`clear` 和 `fork` 会话源下，它会在首轮模型调用前执行快速 `Ensure`；正常运行时
+静默退出，服务异常时等待自动恢复。Hook 是会话级补充，Windows Supervisor 仍是独立于
+Agent 的主运行保障。
 
 Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright
 环境相互隔离，避免版本依赖冲突。

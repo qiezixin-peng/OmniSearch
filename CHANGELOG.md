@@ -2,6 +2,16 @@
 
 本项目的公开版本变更记录保存在此文件。
 
+## Unreleased
+
+### Changed
+
+- Windows 原生运行脚本升级为逐组件 Supervisor，使用真实 API、MCP 协议、Worker 心跳和
+  RSSHub 健康检查恢复异常进程；
+- 进程停止与重启改为追踪完整进程树，避免虚拟环境启动器 PID 与实际 Python 进程不一致；
+- 任务计划启用 `StartWhenAvailable`、互斥执行、登录启动、周期检查和失败重试；
+- 增加 Codex `SessionStart` Hook 入口，为新建、恢复、清空和 Fork 会话提供启动前保障。
+
 ## 0.1.0 — 2026-11-17
 
 首个公开开发版本。
