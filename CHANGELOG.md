@@ -15,6 +15,9 @@
   失败明细，确保调用 Agent 向用户说明实际失效路径、回退和覆盖影响。
 - 修复 `fetch_page` 的 robots.txt 参数校验故障，并约束 OpenAlex 重试预算，使 429 能保留为
   `RATE_LIMITED` 而不是被外层截止时间误报为超时。
+- 增加跨窗口 Provider 尝试日志、诊断 MCP/REST 接口和进程日志归档；同时加入 DuckDuckGo
+  HTML 回退、双 DoH 校验以及 Semantic Scholar 无密钥限速与长熔断，降低浏览器解析失败、
+  Fake-IP DNS 误伤和重复限流。
 
 ## 0.1.0 — 2026-11-17
 

@@ -255,6 +255,18 @@ function Start-ServiceProcess([hashtable]$Service) {
     }
     $Stdout = Join-Path $LogDir "$($Service.Name).stdout.log"
     $Stderr = Join-Path $LogDir "$($Service.Name).stderr.log"
+    $ArchiveDir = Join-Path $LogDir "archive"
+    New-Item -ItemType Directory -Force -Path $ArchiveDir | Out-Null
+    $Timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ")
+    foreach ($LogPath in @($Stdout, $Stderr)) {
+        if ((Test-Path -LiteralPath $LogPath) -and
+            (Get-Item -LiteralPath $LogPath).Length -gt 0) {
+            $Leaf = [IO.Path]::GetFileNameWithoutExtension($LogPath)
+            $Extension = [IO.Path]::GetExtension($LogPath)
+            $ArchivePath = Join-Path $ArchiveDir "$Leaf.$Timestamp$Extension"
+            Move-Item -LiteralPath $LogPath -Destination $ArchivePath
+        }
+    }
     $StartParameters = @{
         FilePath = $Service.Command
         WorkingDirectory = $Service.WorkingDirectory

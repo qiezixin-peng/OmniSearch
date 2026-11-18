@@ -46,22 +46,28 @@ def _is_fake_proxy_ip(address: str) -> bool:
 
 
 async def _resolve_doh(hostname: str) -> set[str]:
-    try:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            response = await client.get(
-                "https://cloudflare-dns.com/dns-query",
-                params={"name": hostname, "type": "A"},
-                headers={"Accept": "application/dns-json"},
-            )
-            response.raise_for_status()
-            answers = response.json().get("Answer", [])
-    except (httpx.HTTPError, ValueError) as error:
-        raise UnsafeUrlError("public DNS verification failed for proxy Fake-IP") from error
-    resolved = {
-        answer["data"]
-        for answer in answers
-        if answer.get("type") == 1 and answer.get("data")
-    }
-    if not resolved:
-        raise UnsafeUrlError("public DNS returned no A record for proxy Fake-IP")
-    return resolved
+    endpoints = (
+        "https://cloudflare-dns.com/dns-query",
+        "https://dns.google/resolve",
+    )
+    last_error: Exception | None = None
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        for endpoint in endpoints:
+            try:
+                response = await client.get(
+                    endpoint,
+                    params={"name": hostname, "type": "A"},
+                    headers={"Accept": "application/dns-json"},
+                )
+                response.raise_for_status()
+                answers = response.json().get("Answer", [])
+                resolved = {
+                    answer["data"]
+                    for answer in answers
+                    if answer.get("type") == 1 and answer.get("data")
+                }
+                if resolved:
+                    return resolved
+            except (httpx.HTTPError, ValueError) as error:
+                last_error = error
+    raise UnsafeUrlError("public DNS verification failed for proxy Fake-IP") from last_error

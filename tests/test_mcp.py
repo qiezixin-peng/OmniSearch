@@ -42,6 +42,7 @@ async def test_mcp_exposes_agent_first_tools(tmp_path, monkeypatch) -> None:
             "get_evidence",
             "verify_claim",
             "get_source_health",
+            "get_provider_diagnostics",
             "evaluate_search_quality",
         } <= names
         research_tool = next(tool for tool in listed.tools if tool.name == "research_start")

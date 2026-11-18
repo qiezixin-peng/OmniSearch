@@ -51,6 +51,7 @@ from omnisearch.storage.database import Database
 from omnisearch.storage.documents import DocumentRepository
 from omnisearch.storage.objects import LocalObjectStore, S3ObjectStore
 from omnisearch.storage.repository import SqlResearchRepository
+from omnisearch.storage.telemetry import ProviderTelemetryRepository
 from omnisearch.workers.queue import JobQueue
 
 
@@ -66,6 +67,7 @@ class OmniRuntime:
     crawler: SiteCrawler
     research: ResearchExecutionService
     jobs: JobQueue
+    provider_telemetry: ProviderTelemetryRepository
 
     def close(self) -> None:
         self.database.engine.dispose()
@@ -84,6 +86,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
     database = Database(settings.database_url)
     database.create_schema()
     repository = SqlResearchRepository(database)
+    provider_telemetry = ProviderTelemetryRepository(database)
     repository.reconcile_cancelled_queries()
     if settings.object_store_backend == "s3":
         object_store = S3ObjectStore(
@@ -207,6 +210,7 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         browser_timeout_seconds=settings.search_browser_timeout_seconds,
         cache_ttl_seconds=settings.search_cache_ttl_seconds,
         cache_max_entries=settings.search_cache_max_entries,
+        attempt_recorder=provider_telemetry.record,
     )
     model_gateway = None
     if settings.model_base_url and settings.model_name:
@@ -243,4 +247,5 @@ def build_runtime(settings: Settings | None = None) -> OmniRuntime:
         crawler=crawler,
         research=research,
         jobs=jobs,
+        provider_telemetry=provider_telemetry,
     )

@@ -67,6 +67,9 @@ async def test_duckduckgo_redirect_and_snippet_parser() -> None:
     results = [item async for item in adapter.search(search_request())]
     assert str(results[0].url) == "https://example.org/repo"
     assert results[0].snippet == "Implementation details"
+    assert adapter._search_urls(search_request())[0].startswith(
+        "https://html.duckduckgo.com/html/"
+    )
 
 
 @pytest.mark.asyncio

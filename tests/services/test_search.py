@@ -167,3 +167,20 @@ async def test_health_reports_recent_circuit_failure() -> None:
     assert health.status == "circuit_open"
     assert health.last_failure_code == "RATE_LIMITED"
     assert health.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_records_success_failure_and_circuit_skip() -> None:
+    events: list[dict] = []
+    adapter = FakeAdapter(
+        "arxiv", error=ProviderError("RATE_LIMITED", "slow down", retryable=True)
+    )
+    service = MultiSourceSearchService([adapter], attempt_recorder=events.append)
+
+    await service.search(QuickSearchCommand(query="first", sources=["arxiv"]))
+    await service.search(QuickSearchCommand(query="second", sources=["arxiv"]))
+
+    assert [item["outcome"] for item in events] == ["failure", "circuit_skip"]
+    assert events[0]["code"] == "RATE_LIMITED"
+    assert events[0]["query_hash"] != events[1]["query_hash"]
+    assert all(len(item["query_hash"]) == 64 for item in events)

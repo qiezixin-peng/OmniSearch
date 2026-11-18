@@ -255,7 +255,15 @@ class DuckDuckGoBrowserAdapter(BrowserSearchAdapter):
 
     def _search_url(self, request: SearchRequest) -> str:
         query = request.query + (f" site:{request.domain}" if request.domain else "")
-        return f"https://duckduckgo.com/?q={quote_plus(query)}&ia=web"
+        return f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+
+    def _search_urls(self, request: SearchRequest) -> list[str]:
+        query = request.query + (f" site:{request.domain}" if request.domain else "")
+        encoded = quote_plus(query)
+        return [
+            f"https://html.duckduckgo.com/html/?q={encoded}",
+            f"https://duckduckgo.com/?q={encoded}&ia=web",
+        ]
 
     def _parse(self, source: str) -> list[dict[str, str]]:
         tree = html.fromstring(source)

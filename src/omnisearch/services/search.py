@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
+import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -83,6 +86,7 @@ class MultiSourceSearchService:
         browser_timeout_seconds: float = 40.0,
         cache_ttl_seconds: float = 900.0,
         cache_max_entries: int = 2048,
+        attempt_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._adapters = {adapter.capabilities.source_id: adapter for adapter in adapters}
         self._semaphores = {
@@ -94,6 +98,7 @@ class MultiSourceSearchService:
         self.browser_timeout_seconds = browser_timeout_seconds
         self.cache_ttl_seconds = cache_ttl_seconds
         self.cache_max_entries = cache_max_entries
+        self._attempt_recorder = attempt_recorder
         self._cache: dict[tuple, _CacheEntry] = {}
         self._inflight: dict[
             tuple, asyncio.Task[tuple[list[SearchResult], SourceFailure | None]]
@@ -204,6 +209,15 @@ class MultiSourceSearchService:
     ) -> tuple[list[SearchResult], SourceFailure | None]:
         adapter = self._adapters.get(source_id)
         if adapter is None:
+            self._record_attempt(
+                source_id=source_id,
+                adapter_id="unknown",
+                channel="unknown",
+                outcome="failure",
+                command=command,
+                code="NOT_AVAILABLE",
+                message="source has no configured runtime adapter",
+            )
             return [], SourceFailure(
                 source_id=source_id,
                 adapter_id="unknown",
@@ -255,6 +269,16 @@ class MultiSourceSearchService:
     ) -> tuple[list[SearchResult], SourceFailure | None]:
         state = self._states[source_id]
         if state.open_until > monotonic():
+            self._record_attempt(
+                source_id=source_id,
+                adapter_id=adapter.capabilities.adapter_id,
+                channel=adapter.capabilities.channel.value,
+                outcome="circuit_skip",
+                command=command,
+                code="CIRCUIT_OPEN",
+                message="source is temporarily paused after repeated provider failures",
+                retryable=True,
+            )
             return [], SourceFailure(
                 source_id=source_id,
                 adapter_id=adapter.capabilities.adapter_id,
@@ -271,6 +295,16 @@ class MultiSourceSearchService:
         )
         async with self._semaphores[source_id]:
             if state.open_until > monotonic():
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="circuit_skip",
+                    command=command,
+                    code="CIRCUIT_OPEN",
+                    message="source is temporarily paused after repeated provider failures",
+                    retryable=True,
+                )
                 return [], SourceFailure(
                     source_id=source_id,
                     adapter_id=adapter.capabilities.adapter_id,
@@ -279,6 +313,7 @@ class MultiSourceSearchService:
                     retryable=True,
                 )
             try:
+                started_at = monotonic()
                 minimum_interval = float(getattr(adapter, "min_interval_seconds", 0.0))
                 delay = state.next_allowed_at - monotonic()
                 if delay > 0:
@@ -304,10 +339,30 @@ class MultiSourceSearchService:
                 state.last_failure_code = None
                 state.last_error = None
                 state.last_success_at = datetime.now(UTC)
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="success",
+                    command=command,
+                    latency_ms=int((monotonic() - started_at) * 1000),
+                    result_count=len(records),
+                )
                 return records, None
             except TimeoutError:
                 message = f"source exceeded its {timeout:g}s latency budget"
                 self._record_failure(source_id, "TIMEOUT", True, message)
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="failure",
+                    command=command,
+                    code="TIMEOUT",
+                    message=message,
+                    retryable=True,
+                    latency_ms=int((monotonic() - started_at) * 1000),
+                )
                 search_failures.add(1, {"source.id": source_id, "error.code": "TIMEOUT"})
                 return [], SourceFailure(
                     source_id=source_id,
@@ -318,6 +373,17 @@ class MultiSourceSearchService:
                 )
             except ProviderError as error:
                 self._record_failure(source_id, error.code, error.retryable, str(error))
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="failure",
+                    command=command,
+                    code=error.code,
+                    message=str(error),
+                    retryable=error.retryable,
+                    latency_ms=int((monotonic() - started_at) * 1000),
+                )
                 search_failures.add(1, {"source.id": source_id, "error.code": error.code})
                 return [], SourceFailure(
                     source_id=source_id,
@@ -328,6 +394,16 @@ class MultiSourceSearchService:
                 )
             except Exception as error:  # isolate an adapter bug from other sources
                 self._record_failure(source_id, "ADAPTER_ERROR", False, str(error))
+                self._record_attempt(
+                    source_id=source_id,
+                    adapter_id=adapter.capabilities.adapter_id,
+                    channel=adapter.capabilities.channel.value,
+                    outcome="failure",
+                    command=command,
+                    code="ADAPTER_ERROR",
+                    message=str(error),
+                    latency_ms=int((monotonic() - started_at) * 1000),
+                )
                 search_failures.add(1, {"source.id": source_id, "error.code": "ADAPTER_ERROR"})
                 return [], SourceFailure(
                     source_id=source_id,
@@ -359,11 +435,52 @@ class MultiSourceSearchService:
             adapter = self._adapters[source_id]
             if code == "ACCESS_DENIED":
                 cooldown = float(getattr(adapter, "access_denied_cooldown_seconds", 300.0))
+            elif code == "RATE_LIMITED":
+                cooldown = float(getattr(adapter, "rate_limit_cooldown_seconds", 60.0))
             elif code == "NOT_CONFIGURED":
                 cooldown = 300.0
             else:
                 cooldown = 60.0
             state.open_until = monotonic() + cooldown
+
+    def _record_attempt(
+        self,
+        *,
+        source_id: str,
+        adapter_id: str,
+        channel: str,
+        outcome: str,
+        command: QuickSearchCommand,
+        code: str | None = None,
+        message: str | None = None,
+        retryable: bool = False,
+        latency_ms: int = 0,
+        result_count: int = 0,
+    ) -> None:
+        if self._attempt_recorder is None:
+            return
+        query_hash = hashlib.sha256(command.query.encode("utf-8")).hexdigest()
+        try:
+            self._attempt_recorder(
+                {
+                    "occurred_at": datetime.now(UTC),
+                    "source_id": source_id,
+                    "adapter_id": adapter_id,
+                    "channel": channel,
+                    "outcome": outcome,
+                    "code": code,
+                    "message": message[:4000] if message else None,
+                    "retryable": retryable,
+                    "latency_ms": max(0, latency_ms),
+                    "result_count": max(0, result_count),
+                    "query_hash": query_hash,
+                    "query_language": command.language,
+                    "process_id": os.getpid(),
+                }
+            )
+        except Exception:
+            # Telemetry must never make a working search path fail.
+            return
 
     @classmethod
     def _merge(cls, records: list[SearchResult]) -> list[MergedSearchResult]:

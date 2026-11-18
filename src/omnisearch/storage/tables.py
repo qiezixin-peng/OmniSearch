@@ -90,6 +90,25 @@ class SourceAdapterRow(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class ProviderAttemptRow(Base):
+    __tablename__ = "provider_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_id: Mapped[str] = mapped_column(String(80), index=True)
+    adapter_id: Mapped[str] = mapped_column(String(100), index=True)
+    channel: Mapped[str] = mapped_column(String(20))
+    outcome: Mapped[str] = mapped_column(String(20), index=True)
+    code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    result_count: Mapped[int] = mapped_column(Integer, default=0)
+    query_hash: Mapped[str] = mapped_column(String(64), index=True)
+    query_language: Mapped[str | None] = mapped_column(String(35), nullable=True)
+    process_id: Mapped[int] = mapped_column(Integer)
+
+
 class QueryVariantRow(Base):
     __tablename__ = "query_variants"
 

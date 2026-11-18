@@ -124,6 +124,12 @@ Agent 的主运行保障。
 和影响要求注入当前轮，调用 Agent 必须在对话中以“搜索状态”说明失败路径、回退情况和覆盖
 影响。未被当前任务选择的 Provider 不会产生无关告警。
 
+所有未命中缓存的 Provider 尝试都会写入数据库中的 `provider_attempts`，记录成功、失败、
+熔断跳过、延迟、错误码和进程 ID；查询内容只保存 SHA-256，不写入原始问题。Agent 可调用
+`get_provider_diagnostics`，或访问 `/v1/provider-diagnostics`，按时间窗口查看跨窗口、跨重启的
+成功率与失败聚合。Provider 尝试记录保留 90 天；进程重启前的 stdout/stderr 会转存到运行
+目录的 `logs/archive`。
+
 Camoufox 浏览器与指纹模型体积较大，第一次安装需要额外下载；它与主项目的 Playwright
 环境相互隔离，避免版本依赖冲突。
 

@@ -17,10 +17,12 @@ def _unix(value: int | None) -> datetime | None:
 class SemanticScholarAdapter(HttpProvider, ProviderAdapter):
     endpoint = "https://api.semanticscholar.org/graph/v1/paper/search"
     min_interval_seconds = 1.1
+    rate_limit_cooldown_seconds = 300.0
 
     def __init__(self, *, api_key: str | None = None, client=None) -> None:
-        super().__init__(client=client)
+        super().__init__(client=client, timeout_seconds=12.0, max_attempts=2)
         self.api_key = api_key
+        self.min_interval_seconds = 1.1 if api_key else 3.0
 
     @property
     def capabilities(self) -> ProviderCapabilities:

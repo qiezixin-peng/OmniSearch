@@ -37,6 +37,7 @@ from omnisearch.services.search import (
 )
 from omnisearch.storage.documents import DocumentRepository, StoredDocument
 from omnisearch.storage.repository import ResearchNotFound
+from omnisearch.storage.telemetry import ProviderTelemetryRepository
 
 
 @asynccontextmanager
@@ -133,6 +134,15 @@ def document_repository(request: Request) -> DocumentRepository:
 DocumentRepositoryDep = Annotated[DocumentRepository, Depends(document_repository)]
 
 
+def provider_telemetry(request: Request) -> ProviderTelemetryRepository:
+    return request.app.state.runtime.provider_telemetry
+
+
+ProviderTelemetryDep = Annotated[
+    ProviderTelemetryRepository, Depends(provider_telemetry)
+]
+
+
 class FetchPageResponse(BaseModel):
     document: AcquiredDocument
     stored: StoredDocument
@@ -175,6 +185,19 @@ def get_source(source_id: str, registry: SourceRegistryDep) -> SourceDefinition:
 @app.get("/v1/source-health", response_model=list[SourceHealth])
 async def get_source_health(service: SearchServiceDep) -> list[SourceHealth]:
     return await service.health()
+
+
+@app.get("/v1/provider-diagnostics")
+def get_provider_diagnostics(
+    telemetry: ProviderTelemetryDep,
+    hours: int = 24,
+    limit: int = 100,
+) -> dict:
+    if not 1 <= hours <= 24 * 90:
+        raise HTTPException(status_code=422, detail="hours must be between 1 and 2160")
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    return telemetry.report(hours=hours, limit=limit)
 
 
 @app.post("/v1/search", response_model=QuickSearchResponse)

@@ -551,6 +551,20 @@ async def get_source_health() -> list[dict[str, Any]]:
     return [item.model_dump(mode="json") for item in await runtime().search.health()]
 
 
+@mcp.tool(
+    description=(
+        "Return durable cross-window provider reliability statistics and recent failures. "
+        "Queries are represented only by SHA-256 hashes."
+    )
+)
+def get_provider_diagnostics(hours: int = 24, limit: int = 100) -> dict[str, Any]:
+    if not 1 <= hours <= 24 * 90:
+        raise ValueError("hours must be between 1 and 2160")
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    return runtime().provider_telemetry.report(hours=hours, limit=limit)
+
+
 def run() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
